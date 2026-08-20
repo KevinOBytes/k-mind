@@ -1,7 +1,7 @@
 | id | task | status | notes |
 | --- | --- | --- | --- |
-| task-1 | Setup Drizzle ORM and Database Schema | pending | |
-| task-2 | Configure NextAuth (Auth.js) and Credentials signup | pending | |
+| task-1 | Setup Drizzle ORM and Database Schema | completed | Dependencies added, schema created, config generated, migration built, and tests passed. |
+| task-2 | Configure NextAuth (Auth.js) and Credentials signup | in_progress | Creating NextAuth router, credentials provider, register route, and auth middleware. |
 | task-3 | Public Marketing Site and Authentication Forms | pending | |
 | task-4 | User Dashboard & Template Manager | pending | |
 | task-5 | Interactive Graph Canvas Editor Workspace | pending | |
