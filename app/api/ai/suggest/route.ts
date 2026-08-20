@@ -32,7 +32,8 @@ export async function POST(req: Request) {
       // 2. Cache Lookup
       const cached = await redis.get(cacheKey);
       if (cached) {
-        return NextResponse.json({ suggestions: JSON.parse(cached), cached: true });
+        const suggestions = typeof cached === 'string' ? JSON.parse(cached) : cached;
+        return NextResponse.json({ suggestions, cached: true });
       }
     }
 
@@ -88,7 +89,7 @@ export async function POST(req: Request) {
 
     // 4. Store in Cache
     if (redis && Array.isArray(suggestions)) {
-      await redis.setEx(cacheKey, 604800, JSON.stringify(suggestions)); // 7 days TTL
+      await redis.set(cacheKey, JSON.stringify(suggestions), { ex: 604800 }); // 7 days TTL
     }
 
     return NextResponse.json({ suggestions, cached: false });
