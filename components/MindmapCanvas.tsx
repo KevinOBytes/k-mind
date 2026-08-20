@@ -1,6 +1,7 @@
 'use client';
 
 /* eslint-disable react-hooks/set-state-in-effect */
+/* eslint-disable react-hooks/purity */
 
 import React, { useState, useCallback, useEffect, useTransition } from 'react';
 import {
@@ -40,7 +41,7 @@ export interface CanvasNodeInput {
   xPos: number;
   yPos: number;
   color: string | null;
-  metadata: Record<string, unknown> | null;
+  metadata: unknown;
 }
 
 export interface CanvasEdgeInput {
@@ -56,6 +57,11 @@ interface MindmapCanvasProps {
   initialEdges: CanvasEdgeInput[];
 }
 
+interface AISuggestion {
+  label: string;
+  description: string;
+}
+
 export default function MindmapCanvas({
   mapId,
   initialTitle,
@@ -64,17 +70,20 @@ export default function MindmapCanvas({
 }: MindmapCanvasProps) {
   // Convert DB coordinates to React Flow node format
   const formatInitialNodes = useCallback(() => {
-    return initialNodes.map((n) => ({
-      id: n.id,
-      type: 'skill',
-      position: { x: n.xPos, y: n.yPos },
-      data: {
-        label: n.label,
-        description: n.description || '',
-        color: n.color || '#2563eb',
-        status: (n.metadata?.status as 'planned' | 'in_progress' | 'completed') || 'planned',
-      },
-    }));
+    return initialNodes.map((n) => {
+      const meta = n.metadata as Record<string, unknown> | null;
+      return {
+        id: n.id,
+        type: 'skill',
+        position: { x: n.xPos, y: n.yPos },
+        data: {
+          label: n.label,
+          description: n.description || '',
+          color: n.color || '#2563eb',
+          status: (meta?.status as 'planned' | 'in_progress' | 'completed') || 'planned',
+        },
+      };
+    });
   }, [initialNodes]);
 
   const formatInitialEdges = useCallback(() => {
@@ -100,6 +109,12 @@ export default function MindmapCanvas({
   const [nodeColor, setNodeColor] = useState('#2563eb');
   const [nodeStatus, setNodeStatus] = useState<'planned' | 'in_progress' | 'completed'>('planned');
 
+  // AI Copilot States
+  const [aiSuggestions, setAiSuggestions] = useState<AISuggestion[]>([]);
+  const [aiType, setAiType] = useState<'child' | 'parent' | 'sibling'>('child');
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+
   // Load selected node fields into form
   useEffect(() => {
     if (selectedNode) {
@@ -107,11 +122,15 @@ export default function MindmapCanvas({
       setNodeDesc(selectedNode.data.description as string || '');
       setNodeColor(selectedNode.data.color as string || '#2563eb');
       setNodeStatus((selectedNode.data.status as 'planned' | 'in_progress' | 'completed') || 'planned');
+      setAiSuggestions([]);
+      setAiError(null);
     } else {
       setNodeLabel('');
       setNodeDesc('');
       setNodeColor('#2563eb');
       setNodeStatus('planned');
+      setAiSuggestions([]);
+      setAiError(null);
     }
   }, [selectedNode]);
 
@@ -195,7 +214,7 @@ export default function MindmapCanvas({
         label: 'New Concept',
         description: 'Double click to edit details in sidebar.',
         color: '#2563eb',
-        status: 'planned',
+        status: 'planned' as const,
       },
     };
     setNodes((nds) => nds.concat(newNode));
@@ -320,17 +339,20 @@ export default function MindmapCanvas({
         const result = fileType === 'opml' ? parseOpml(text) : parseFreeMind(text);
         
         // Map back to React Flow format
-        const importedNodes = result.nodes.map((n) => ({
-          id: n.id,
-          type: 'skill',
-          position: { x: n.xPos, y: n.yPos },
-          data: {
-            label: n.label,
-            description: n.description || '',
-            color: n.color || '#2563eb',
-            status: (n.metadata?.status as 'planned' | 'in_progress' | 'completed') || 'planned',
-          },
-        }));
+        const importedNodes = result.nodes.map((n) => {
+          const meta = n.metadata as Record<string, unknown> | null;
+          return {
+            id: n.id,
+            type: 'skill',
+            position: { x: n.xPos, y: n.yPos },
+            data: {
+              label: n.label,
+              description: n.description || '',
+              color: n.color || '#2563eb',
+              status: (meta?.status as 'planned' | 'in_progress' | 'completed') || 'planned',
+            },
+          };
+        });
 
         const importedEdges = result.edges.map((e) => ({
           id: e.id,
@@ -346,6 +368,79 @@ export default function MindmapCanvas({
       }
     };
     reader.readAsText(file);
+  };
+
+  // AI Suggestion Handler
+  const handleGetAISuggestions = async () => {
+    if (!selectedNode) return;
+    setAiLoading(true);
+    setAiError(null);
+    setAiSuggestions([]);
+
+    try {
+      const response = await fetch('/api/ai/suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          label: selectedNode.data.label,
+          type: aiType,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to fetch suggestions');
+      }
+      setAiSuggestions(data.suggestions || []);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : 'An error occurred fetching recommendations.';
+      setAiError(errMsg);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  // Promote suggestion to node
+  const handlePromoteSuggestion = (sug: AISuggestion) => {
+    if (!selectedNode) return;
+
+    let offset = { x: 0, y: 0 };
+    if (aiType === 'child') {
+      offset = { x: 260, y: (Math.random() - 0.5) * 150 };
+    } else if (aiType === 'parent') {
+      offset = { x: -260, y: (Math.random() - 0.5) * 150 };
+    } else {
+      offset = { x: (Math.random() - 0.5) * 150, y: 160 };
+    }
+
+    const newId = `n-ai-${uuidv4()}`;
+    const newNode = {
+      id: newId,
+      type: 'skill',
+      position: {
+        x: selectedNode.position.x + offset.x,
+        y: selectedNode.position.y + offset.y,
+      },
+      data: {
+        label: sug.label,
+        description: sug.description,
+        color: '#7c3aed', // Purple color representing AI generated node
+        status: 'planned' as const,
+      },
+    };
+
+    const newEdge = {
+      id: `e-${uuidv4()}`,
+      source: aiType === 'parent' ? newId : selectedNode.id,
+      target: aiType === 'parent' ? selectedNode.id : newId,
+      type: 'skill',
+    };
+
+    setNodes((nds) => nds.concat(newNode));
+    setEdges((eds) => eds.concat(newEdge));
+
+    // Remove from suggestions array
+    setAiSuggestions((prev) => prev.filter((s) => s.label !== sug.label));
   };
 
   return (
@@ -471,7 +566,7 @@ export default function MindmapCanvas({
 
       {/* Selected Node Sidebar Form */}
       {selectedNode && (
-        <div className="w-80 border-l border-slate-200 bg-white h-full flex flex-col p-6 shadow-xl z-20">
+        <div className="w-80 border-l border-slate-200 bg-white h-full flex flex-col p-6 shadow-xl z-20 overflow-y-auto">
           <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-6">
             <h3 className="font-bold text-slate-900 text-lg">Edit Node</h3>
             <button 
@@ -482,7 +577,7 @@ export default function MindmapCanvas({
             </button>
           </div>
 
-          <div className="flex-1 overflow-y-auto space-y-4">
+          <div className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
                 Node Label
@@ -502,7 +597,7 @@ export default function MindmapCanvas({
               <textarea
                 value={nodeDesc}
                 onChange={(e) => setNodeDesc(e.target.value)}
-                rows={4}
+                rows={3}
                 className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
               />
             </div>
@@ -540,21 +635,84 @@ export default function MindmapCanvas({
                 <option value="completed">Completed (✅)</option>
               </select>
             </div>
+
+            <div className="pt-2 flex flex-col gap-2">
+              <button
+                onClick={handleUpdateNode}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm py-2 rounded-lg transition"
+              >
+                Apply Changes
+              </button>
+              <button
+                onClick={handleDeleteNode}
+                className="w-full border border-red-200 text-red-600 hover:bg-red-50 font-medium text-sm py-2 rounded-lg transition"
+              >
+                Delete Node
+              </button>
+            </div>
           </div>
 
-          <div className="border-t border-slate-100 pt-4 mt-6 flex flex-col gap-2">
+          {/* AI SUGGESTIONS SECTION */}
+          <div className="mt-8 border-t border-slate-100 pt-6">
+            <h4 className="font-bold text-slate-900 text-sm mb-3">🔮 AI Skill Copilot</h4>
+            
+            <div className="flex gap-1 mb-3">
+              {(['child', 'sibling', 'parent'] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setAiType(t)}
+                  className={`flex-1 text-center py-1 text-xs font-semibold rounded-md border transition capitalize ${
+                    aiType === t
+                      ? 'bg-purple-100 text-purple-700 border-purple-200'
+                      : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  {t === 'child' ? 'Sub-skills' : t === 'sibling' ? 'Siblings' : 'Prereqs'}
+                </button>
+              ))}
+            </div>
+
             <button
-              onClick={handleUpdateNode}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm py-2 rounded-lg transition"
+              onClick={handleGetAISuggestions}
+              disabled={aiLoading}
+              className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-purple-400 text-white font-medium text-sm py-2 rounded-lg transition shadow-sm hover:shadow"
             >
-              Apply Changes
+              {aiLoading ? 'Thinking...' : 'Get AI Suggestions'}
             </button>
-            <button
-              onClick={handleDeleteNode}
-              className="w-full border border-red-200 text-red-600 hover:bg-red-50 font-medium text-sm py-2 rounded-lg transition"
-            >
-              Delete Node
-            </button>
+
+            {aiError && (
+              <p className="mt-3 text-xs text-red-600 bg-red-50 p-2 rounded border border-red-100">
+                {aiError}
+              </p>
+            )}
+
+            {aiSuggestions.length > 0 && (
+              <div className="mt-4 space-y-3">
+                <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                  Suggestions (click + to add to map)
+                </p>
+                {aiSuggestions.map((sug) => (
+                  <div 
+                    key={sug.label} 
+                    className="p-3 border border-purple-100 rounded-xl bg-purple-50/50 hover:bg-purple-50 transition flex items-start justify-between gap-2 group"
+                  >
+                    <div className="overflow-hidden">
+                      <p className="text-xs font-bold text-slate-900">{sug.label}</p>
+                      <p className="text-[11px] text-slate-500 mt-0.5 line-clamp-2 leading-relaxed">
+                        {sug.description}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handlePromoteSuggestion(sug)}
+                      className="bg-purple-600 hover:bg-purple-700 text-white rounded-md w-6 h-6 flex items-center justify-center font-bold text-sm shadow transition flex-shrink-0"
+                      title="Add to Canvas"
+                    >
+                      +
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
