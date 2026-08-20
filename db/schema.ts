@@ -5,7 +5,7 @@ export const users = pgTable('users', {
   name: varchar('name', { length: 255 }),
   email: varchar('email', { length: 255 }).notNull().unique(),
   emailVerified: timestamp('email_verified'),
-  passwordHash: varchar('password_hash', { length: 255 }).notNull(),
+  passwordHash: varchar('password_hash', { length: 255 }), // Made nullable to support passwordless logins
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
@@ -13,6 +13,12 @@ export const sessions = pgTable('sessions', {
   id: uuid('id').defaultRandom().primaryKey(),
   sessionToken: varchar('session_token', { length: 255 }).notNull().unique(),
   userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  expires: timestamp('expires').notNull(),
+});
+
+export const verificationTokens = pgTable('verification_tokens', {
+  identifier: varchar('identifier', { length: 255 }).notNull(),
+  token: varchar('token', { length: 255 }).notNull().primaryKey(),
   expires: timestamp('expires').notNull(),
 });
 
