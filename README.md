@@ -1,36 +1,89 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# k-mind: AI-Powered Multi-Linked Mind Map Builder
 
-## Getting Started
+`k-mind` is a Next.js mind-mapping application designed to represent complex learning pathways and skill structures. Unlike traditional mindmaps that are restricted to hierarchical tree layouts, `k-mind` allows directed acyclic graphs (DAGs) where a single concept can connect to multiple parents (prerequisites) and multiple children. 
 
-First, run the development server:
+It features an AI-assisted copilot to suggest related parent/sibling/child skills and supports importing/exporting maps in OPML, FreeMind (.mm), and native JSON formats.
 
+---
+
+## 🚀 Quick Start (Docker Compose)
+
+The easiest way to run the entire stack (Next.js standalone server, PostgreSQL, Redis, and Nginx proxy) is via Docker Compose.
+
+### Prerequisites
+- Install [Docker and Docker Compose](https://docs.docker.com/get-docker/).
+
+### Run the Stack
+1. Clone the repository and navigate into it:
+   ```bash
+   git clone <repo-url> k-mind
+   cd k-mind
+   ```
+2. Copy the example environment file and configure your keys:
+   ```bash
+   cp .env.example .env
+   ```
+   *Make sure to add your Google Gemini or OpenAI API keys inside `.env` to enable the AI suggestions feature.*
+
+3. Spin up the containers:
+   ```bash
+   docker compose up --build -d
+   ```
+
+4. Access the application in your browser:
+   - **Local URL**: [http://localhost](http://localhost) (Proxied via Nginx)
+
+5. Stop the stack:
+   ```bash
+   docker compose down
+   ```
+
+---
+
+## 💻 Local Development Setup
+
+If you prefer to run the Next.js frontend locally with hot-reloading:
+
+### 1. Run Dependencies (Database & Cache)
+You can use docker compose to run only PostgreSQL and Redis:
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+docker compose up -d db redis
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 2. Install Frontend Dependencies
+```bash
+npm install
+```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 3. Run Database Migrations
+Make sure your `.env` contains the correct `DATABASE_URL` pointing to localhost (e.g. `postgresql://postgres:postgres@localhost:5432/kmind`).
+```bash
+npm run db:push  # if using drizzle-kit push, or:
+npm run db:migrate
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### 4. Run Dev Server
+```bash
+npm run dev
+```
+Open [http://localhost:3000](http://localhost:3000) to view the application.
 
-## Learn More
+---
 
-To learn more about Next.js, take a look at the following resources:
+## 🛠️ Stack & Architecture
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- **Frontend Framework**: Next.js 16 (App Router), React 19, Tailwind CSS.
+- **Canvas Renderer**: React Flow (`@xyflow/react`) for graph canvas interactions.
+- **Database**: PostgreSQL with Drizzle ORM for schema declarations and migrations.
+- **Caching**: Redis for caching LLM suggestion responses and rate-limiting.
+- **Reverse Proxy**: Nginx routing requests to the Next.js runtime.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+---
 
-## Deploy on Vercel
+## 📚 Project Documentation
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Detailed project architecture and technical specifications are stored in the `/docs` directory:
+- [Requirements Specification](file:///Users/kevo/Projects/k-mind/docs/REQUIREMENTS.md): User stories, features scope, and performance requirements.
+- [Technical Design & Architecture](file:///Users/kevo/Projects/k-mind/docs/DESIGN.md): Database schemas, API route design, layout engine strategies, and Nginx configurations.
+- [Feature Catalog](file:///Users/kevo/Projects/k-mind/docs/FEATURES.md): Functional overview of the interactive canvas, AI Copilot integration, and import/export adapters.
+- [Project Roadmap](file:///Users/kevo/Projects/k-mind/TODO.md): Phase-by-phase implementation tasks.
