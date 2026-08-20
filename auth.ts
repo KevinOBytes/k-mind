@@ -1,11 +1,25 @@
 import NextAuth from 'next-auth';
 import Credentials from 'next-auth/providers/credentials';
+import Nodemailer from 'next-auth/providers/nodemailer';
+import { DrizzleAdapter } from '@auth/drizzle-adapter';
 import { db, users } from './db';
 import { eq } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
+  adapter: DrizzleAdapter(db),
   providers: [
+    Nodemailer({
+      server: {
+        host: process.env.EMAIL_SERVER_HOST || 'localhost',
+        port: parseInt(process.env.EMAIL_SERVER_PORT || '1025', 10),
+        auth: {
+          user: process.env.EMAIL_SERVER_USER || '',
+          pass: process.env.EMAIL_SERVER_PASSWORD || '',
+        },
+      },
+      from: process.env.EMAIL_FROM || 'noreply@kmind.com',
+    }),
     Credentials({
       name: 'Credentials',
       credentials: {
@@ -26,7 +40,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           .where(eq(users.email, email))
           .limit(1);
 
-        if (!user) {
+        if (!user || !user.passwordHash) {
           return null;
         }
 
