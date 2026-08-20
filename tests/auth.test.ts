@@ -1,4 +1,4 @@
-import { expect, test, vi } from 'vitest';
+import { expect, test } from 'vitest';
 import bcrypt from 'bcryptjs';
 
 test('password hashing works and matches output', async () => {
