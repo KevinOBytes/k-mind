@@ -1,34 +1,20 @@
-import { createClient } from 'redis';
+import { Redis } from '@upstash/redis';
 
-const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-
-let redisClient: ReturnType<typeof createClient> | null = null;
+let redisClient: Redis | null = null;
 
 export async function getRedisClient() {
   if (redisClient) return redisClient;
 
-  const client = createClient({
-    url: redisUrl,
-    socket: {
-      connectTimeout: 500, // Keep connection fast
-      reconnectStrategy: (retries) => {
-        // Return an Error to stop retrying connection if server is down (e.g. during test run)
-        if (retries > 1) {
-          return new Error('Redis connection failed');
-        }
-        return 100; // Retry after 100ms
-      }
-    }
-  });
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
 
-  client.on('error', (err) => {
-    // Suppress logs during server check
-    console.warn('Redis Client Connection Warning:', err.message);
-  });
+  if (!url || !token) {
+    console.warn('Upstash Redis environment variables are missing. Running without caching capabilities.');
+    return null;
+  }
 
   try {
-    await client.connect();
-    redisClient = client;
+    redisClient = new Redis({ url, token });
     return redisClient;
   } catch {
     return null;
