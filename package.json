@@ -20,7 +20,8 @@
     "bcryptjs": "^2.4.3",
     "uuid": "^9.0.1",
     "next-auth": "5.0.0-beta.25",
-    "redis": "^4.6.13"
+    "redis": "^4.6.13",
+    "zod": "^3.22.4"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
