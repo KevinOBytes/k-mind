@@ -7,3 +7,8 @@
 | task-5 | Interactive Graph Canvas Editor Workspace | completed | Built React Flow workspace, custom node/edge shapes, D3 Hierarchy layout engine, and debounced database autosave checks. |
 | task-6 | Serialization Adapters (JSON, OPML, FreeMind) | completed | Built adapters for JSON, OPML, and FreeMind formats, and verified lossless graph transformations via Vitest unit tests. |
 | task-7 | AI Skill Copilot Panel & Redis Configuration | completed | Integrating Gemini API suggestions backend, setting up Redis caching client, and building the UI sidebar preview pane. |
+| task-8 | Cloud Package Dependencies Setup | not_started | Install @neondatabase/serverless, @upstash/redis, and @aws-sdk/client-s3. |
+| task-9 | Neon Serverless & Schema Updates | not_started | Configure WebSocket connections in db/index.ts and add verificationTokens schema in db/schema.ts. |
+| task-10 | Upstash Redis HTTP Client | not_started | Rewrite Redis singleton client inside lib/redis.ts utilizing REST endpoint calls. |
+| task-11 | Cloudflare R2 S3 Object Storage Client | not_started | Create lib/s3.ts client wrapper supporting object uploads and downloads. |
+| task-12 | NextAuth Passwordless Email Provider | not_started | Enable passwordless Magic Link email authentication provider inside auth.ts. |
