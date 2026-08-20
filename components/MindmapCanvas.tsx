@@ -23,7 +23,7 @@ import { renameMindmap } from '@/app/actions/mindmaps';
 import { exportJson, ReactFlowNode, ReactFlowEdge } from '@/lib/adapters/json';
 import { generateOpml, parseOpml } from '@/lib/adapters/opml';
 import { generateFreeMind, parseFreeMind } from '@/lib/adapters/freemind';
-import dagre from 'dagre';
+import * as d3 from 'd3-hierarchy';
 import { v4 as uuidv4 } from 'uuid';
 
 const nodeTypes = {
@@ -264,32 +264,101 @@ export default function MindmapCanvas({
     setSelectedNode(null);
   };
 
-  // Auto layout using Dagre
-  const applyDagreLayout = (direction: 'TB' | 'LR') => {
-    const dagreGraph = new dagre.graphlib.Graph();
-    dagreGraph.setDefaultEdgeLabel(() => ({}));
-    dagreGraph.setGraph({ rankdir: direction });
+  // Auto layout using D3 Hierarchy
+  const applyD3Layout = (direction: 'TB' | 'LR') => {
+    if (nodes.length === 0) return;
 
-    nodes.forEach((node) => {
-      dagreGraph.setNode(node.id, { width: 240, height: 80 });
-    });
+    // 1. Identify all parents and build relationship map
+    // Keep track of visited parents per node to only assign the first/primary parent (strict tree rule)
+    const nodeIds = new Set(nodes.map((n) => n.id));
+    const targetToPrimaryParent = new Map<string, string>();
+    const parentToChildren = new Map<string, string[]>();
 
     edges.forEach((edge) => {
-      dagreGraph.setEdge(edge.source, edge.target);
+      const source = edge.source;
+      const target = edge.target;
+      // Ensure nodes exist and we haven't assigned a primary parent for this target node yet
+      if (nodeIds.has(source) && nodeIds.has(target) && !targetToPrimaryParent.has(target)) {
+        targetToPrimaryParent.set(target, source);
+        const children = parentToChildren.get(source) || [];
+        children.push(target);
+        parentToChildren.set(source, children);
+      }
     });
 
-    dagre.layout(dagreGraph);
+    // 2. Identify root nodes (nodes with no primary parent)
+    const roots = nodes.filter((n) => !targetToPrimaryParent.has(n.id));
+    if (roots.length === 0) return; // cyclic graph safety
 
+    // 3. Build recursive hierarchy structure
+    interface LayoutNode {
+      id: string;
+      children?: LayoutNode[];
+    }
+
+    const buildHierarchyNode = (nodeId: string, visited: Set<string>): LayoutNode => {
+      visited.add(nodeId);
+      const childIds = parentToChildren.get(nodeId) || [];
+      const childrenNodes: LayoutNode[] = [];
+
+      childIds.forEach((cid) => {
+        if (!visited.has(cid)) {
+          childrenNodes.push(buildHierarchyNode(cid, visited));
+        }
+      });
+
+      return childrenNodes.length > 0 ? { id: nodeId, children: childrenNodes } : { id: nodeId };
+    };
+
+    const globalVisited = new Set<string>();
+    let rootHierarchyData: LayoutNode;
+
+    if (roots.length === 1) {
+      rootHierarchyData = buildHierarchyNode(roots[0].id, globalVisited);
+    } else {
+      // Wrap multiple roots under a single virtual root
+      rootHierarchyData = {
+        id: 'virtual-root',
+        children: roots.map((r) => buildHierarchyNode(r.id, globalVisited)),
+      };
+    }
+
+    // 4. Run D3 tree layout
+    const siblingSpacing = 300;
+    const levelSpacing = 200;
+
+    const d3Root = d3.hierarchy<LayoutNode>(rootHierarchyData);
+    const treeLayout = d3.tree<LayoutNode>().nodeSize([siblingSpacing, levelSpacing]);
+    treeLayout(d3Root);
+
+    // 5. Build coordinates map
+    const coordsMap = new Map<string, { x: number; y: number }>();
+    d3Root.descendants().forEach((d) => {
+      if (d.data.id !== 'virtual-root') {
+        if (direction === 'TB') {
+          // Vertical Layout
+          coordsMap.set(d.data.id, { x: d.x ?? 0, y: d.y ?? 0 });
+        } else {
+          // Horizontal Layout
+          coordsMap.set(d.data.id, { x: d.y ?? 0, y: d.x ?? 0 });
+        }
+      }
+    });
+
+    // 6. Map coordinates back to React Flow nodes state
     setNodes((nds) =>
       nds.map((node) => {
-        const nodeWithPosition = dagreGraph.node(node.id);
-        return {
-          ...node,
-          position: {
-            x: nodeWithPosition.x - 120, // Offset half width
-            y: nodeWithPosition.y - 40,  // Offset half height
-          },
-        };
+        const coords = coordsMap.get(node.id);
+        if (coords) {
+          return {
+            ...node,
+            position: {
+              x: coords.x,
+              y: coords.y,
+            },
+          };
+        }
+        return node;
       })
     );
   };
@@ -500,14 +569,14 @@ export default function MindmapCanvas({
               + Add Node
             </button>
             <button 
-              onClick={() => applyDagreLayout('TB')}
+              onClick={() => applyD3Layout('TB')}
               className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
               title="Arrange nodes from Top to Bottom"
             >
               ⬇️ Vertical Layout
             </button>
             <button 
-              onClick={() => applyDagreLayout('LR')}
+              onClick={() => applyD3Layout('LR')}
               className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
               title="Arrange nodes from Left to Right"
             >
