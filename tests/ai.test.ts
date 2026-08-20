@@ -27,7 +27,7 @@ test('AI Suggest API: returns mock recommendations when API key is missing', asy
   });
 
   // Mock process.env
-  vi.stubEnv('GEMINI_API_KEY', 'your_gemini_api_key_here');
+  vi.stubEnv('OPENROUTER_API_KEY', 'your_openrouter_api_key_here');
 
   const response = await POST(request);
   expect(response.status).toBe(200);

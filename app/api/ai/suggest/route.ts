@@ -37,8 +37,8 @@ export async function POST(req: Request) {
     }
 
     // 3. LLM Generation
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === 'your_gemini_api_key_here') {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey || apiKey === 'your_openrouter_api_key_here') {
       // Return mock response for developer testing if API key is missing
       const mockSuggestions = getMockSuggestions(label, type);
       return NextResponse.json({ suggestions: mockSuggestions, mock: true });
@@ -55,28 +55,32 @@ export async function POST(req: Request) {
       userPrompt = `Suggest 4 related technologies or brother/sister concepts that exist at the same level as "${label}".`;
     }
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-    const response = await fetch(geminiUrl, {
+    const modelName = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash';
+    const openRouterUrl = 'https://openrouter.ai/api/v1/chat/completions';
+    const response = await fetch(openRouterUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'HTTP-Referer': 'http://localhost:3000',
+        'X-Title': 'k-mind',
+      },
       body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              { text: `${systemInstruction}\n\nTask: ${userPrompt}` }
-            ]
-          }
+        model: modelName,
+        messages: [
+          { role: 'system', content: systemInstruction },
+          { role: 'user', content: userPrompt }
         ]
       }),
     });
 
     if (!response.ok) {
-      console.error('Gemini API Error Status:', response.status);
+      console.error('OpenRouter API Error Status:', response.status);
       return NextResponse.json({ error: 'Failed to fetch suggestions from AI service' }, { status: 502 });
     }
 
     const data = await response.json();
-    const generatedText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const generatedText = data.choices?.[0]?.message?.content || '';
     
     // Clean code blocks if present
     const jsonString = generatedText.replace(/```json/gi, '').replace(/```/g, '').trim();
