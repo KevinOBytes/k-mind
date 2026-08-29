@@ -14,8 +14,8 @@ export async function getRedisClient(): Promise<UnifiedRedis | null> {
   if (unifiedClient) return unifiedClient;
 
   // 1. Try Upstash Redis REST (Serverless / Production)
-  const upstashUrl = process.env.UPSTASH_REDIS_REST_URL;
-  const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const upstashUrl = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+  const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
 
   if (upstashUrl && upstashToken) {
     try {
