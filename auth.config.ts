@@ -4,6 +4,7 @@ import type { NextAuthConfig } from 'next-auth';
 export const authConfig = {
   providers: [], // Providers are defined in auth.ts (server-side only) to avoid database and bcrypt imports on Edge runtime
   session: { strategy: 'jwt' },
+  trustHost: true,
   pages: {
     signIn: '/login',
   },
