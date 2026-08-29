@@ -5,8 +5,10 @@ import { DrizzleAdapter } from '@auth/drizzle-adapter';
 import { db, users } from './db';
 import { eq } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
+import { authConfig } from './auth.config';
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
+  ...authConfig,
   adapter: DrizzleAdapter(db),
   providers: [
     Nodemailer({
@@ -57,23 +59,4 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       },
     }),
   ],
-  session: { strategy: 'jwt' },
-  callbacks: {
-    async jwt({ token, user }) {
-      if (user) {
-        token.id = user.id;
-      }
-      return token;
-    },
-    async session({ session, token }) {
-      if (session.user && token.id) {
-        session.user.id = token.id as string;
-      }
-      return session;
-    },
-  },
-  pages: {
-    signIn: '/login',
-  },
-  secret: process.env.AUTH_SECRET || 'fallback-secret-for-development-only-12345',
 });
