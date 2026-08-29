@@ -16,6 +16,21 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+
+  migration:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    container_name: mindmap-migration
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-kmind}?schema=public
+    command: npx drizzle-kit push
+    depends_on:
+      db:
+        condition: service_healthy
 
   db:
     image: postgres:16-alpine
