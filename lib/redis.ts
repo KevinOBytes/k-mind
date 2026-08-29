@@ -4,8 +4,8 @@ import { createClient } from 'redis';
 interface UnifiedRedis {
   incr(key: string): Promise<number>;
   expire(key: string, seconds: number): Promise<boolean | number>;
-  get(key: string): Promise<any>;
-  set(key: string, value: string, options: { ex: number }): Promise<any>;
+  get(key: string): Promise<unknown>;
+  set(key: string, value: string, options: { ex: number }): Promise<unknown>;
 }
 
 let unifiedClient: UnifiedRedis | null = null;
