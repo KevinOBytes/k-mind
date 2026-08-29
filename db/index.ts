@@ -4,10 +4,10 @@ import { neon } from '@neondatabase/serverless';
 import { Pool } from 'pg';
 import * as schema from './schema';
 
-const databaseUrl = process.env.DATABASE_URL;
+const databaseUrl = process.env.NEON_DATABASE_URL || process.env.DATABASE_URL;
 
 if (!databaseUrl) {
-  throw new Error('DATABASE_URL environment variable is missing.');
+  throw new Error('Database connection URL (NEON_DATABASE_URL or DATABASE_URL) is missing.');
 }
 
 // Dynamically select the correct Drizzle driver:
