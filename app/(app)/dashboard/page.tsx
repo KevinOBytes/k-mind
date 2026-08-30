@@ -1,8 +1,9 @@
 import React from 'react';
 import Link from 'next/link';
-import { getMindmaps, createMindmap, deleteMindmap } from '@/app/actions/mindmaps';
+import { getMindmaps, createMindmap } from '@/app/actions/mindmaps';
 import { redirect } from 'next/navigation';
 import AIDashboardBuilder from '@/components/AIDashboardBuilder';
+import DeleteMapButton from '@/components/DeleteMapButton';
 
 export default async function DashboardPage() {
   const maps = await getMindmaps().catch(() => []);
@@ -16,12 +17,7 @@ export default async function DashboardPage() {
     redirect(`/map/${id}`);
   };
 
-  // Server Action to delete map
-  const handleDeleteMap = async (formData: FormData) => {
-    'use server';
-    const id = formData.get('id') as string;
-    await deleteMindmap(id);
-  };
+
 
   return (
     <div className="flex-1 overflow-y-auto px-8 py-8">
@@ -137,20 +133,7 @@ export default async function DashboardPage() {
                   >
                     Open Workspace
                   </Link>
-                  <form action={handleDeleteMap} onSubmit={(e) => {
-                    if (!confirm('Are you sure you want to delete this mind map?')) {
-                      e.preventDefault();
-                    }
-                  }}>
-                    <input type="hidden" name="id" value={map.id} />
-                    <button 
-                      type="submit" 
-                      className="border border-slate-200 hover:bg-red-50 hover:text-red-600 text-slate-400 p-2 rounded-lg transition"
-                      title="Delete Mind Map"
-                    >
-                      🗑️
-                    </button>
-                  </form>
+                  <DeleteMapButton id={map.id} />
                 </div>
               </div>
             ))}
