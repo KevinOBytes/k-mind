@@ -2,6 +2,7 @@ import React from 'react';
 import Link from 'next/link';
 import { getMindmaps, createMindmap, deleteMindmap } from '@/app/actions/mindmaps';
 import { redirect } from 'next/navigation';
+import AIDashboardBuilder from '@/components/AIDashboardBuilder';
 
 export default async function DashboardPage() {
   const maps = await getMindmaps().catch(() => []);
@@ -35,7 +36,7 @@ export default async function DashboardPage() {
       {/* Creation and Templates Section */}
       <div className="mb-12">
         <h2 className="text-xl font-bold text-slate-800 mb-4">Start with a Template</h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
           {/* Blank Map Template */}
           <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm hover:shadow-md transition flex flex-col justify-between">
             <div>
@@ -86,7 +87,7 @@ export default async function DashboardPage() {
               <input 
                 type="text" 
                 name="title" 
-                placeholder="E.g., AI Research Paper Map" 
+                placeholder="E.g., AI Research Map" 
                 className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
                 required
               />
@@ -98,6 +99,9 @@ export default async function DashboardPage() {
               </button>
             </form>
           </div>
+
+          {/* AI Skill List Importer */}
+          <AIDashboardBuilder />
         </div>
       </div>
 

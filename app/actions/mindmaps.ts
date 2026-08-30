@@ -126,3 +126,52 @@ export async function renameMindmap(id: string, title: string) {
   revalidatePath('/dashboard');
   revalidatePath(`/map/${id}`);
 }
+
+export async function createMindmapFromGraph(
+  title: string,
+  description: string,
+  nodesList: Array<{ id: string; position: { x: number; y: number }; data: { label: string; description: string; color?: string; status?: string } }>,
+  edgesList: Array<{ source: string; target: string }>
+) {
+  const user = await getSessionUserOrRedirect();
+  const userId = user.id as string;
+  const mapId = uuidv4();
+
+  await db.insert(mindmaps).values({
+    id: mapId,
+    userId: userId,
+    title,
+    description: description || '',
+  });
+
+  // Insert nodes
+  if (nodesList.length > 0) {
+    await db.insert(nodes).values(
+      nodesList.map((n) => ({
+        id: `${mapId}-${n.id}`,
+        mindmapId: mapId,
+        label: n.data.label,
+        description: n.data.description || '',
+        xPos: n.position.x,
+        yPos: n.position.y,
+        color: n.data.color || '#2563eb',
+        metadata: { status: n.data.status || 'planned' },
+      }))
+    );
+  }
+
+  // Insert edges
+  if (edgesList.length > 0) {
+    await db.insert(edges).values(
+      edgesList.map((e, index) => ({
+        id: `${mapId}-e-${index}-${uuidv4().substring(0, 8)}`,
+        mindmapId: mapId,
+        sourceNodeId: `${mapId}-${e.source}`,
+        targetNodeId: `${mapId}-${e.target}`,
+      }))
+    );
+  }
+
+  revalidatePath('/dashboard');
+  return mapId;
+}
