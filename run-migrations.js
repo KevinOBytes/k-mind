@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
 const { execSync } = require('child_process');
 
 const dbUrl = process.env.NEON_DATABASE_URL || process.env.DATABASE_URL;

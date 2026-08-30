@@ -63,48 +63,45 @@ export async function saveMapData(
     throw new Error('Unauthorized or map not found');
   }
 
-  // Atomic transaction to clear and reload nodes and edges
-  await db.transaction(async (tx) => {
-    // Delete existing edges and nodes
-    await tx.delete(edges).where(eq(edges.mindmapId, mapId));
-    await tx.delete(nodes).where(eq(nodes.mindmapId, mapId));
+  // Delete existing edges and nodes
+  await db.delete(edges).where(eq(edges.mindmapId, mapId));
+  await db.delete(nodes).where(eq(nodes.mindmapId, mapId));
 
-    // Insert new nodes
-    if (nodesData.length > 0) {
-      await tx.insert(nodes).values(
-        nodesData.map((n) => ({
-          id: n.id,
-          mindmapId: mapId,
-          label: n.label,
-          description: n.description || '',
-          xPos: n.xPos,
-          yPos: n.yPos,
-          color: n.color || '#2563eb',
-          metadata: n.metadata || {},
-        }))
-      );
-    }
+  // Insert new nodes
+  if (nodesData.length > 0) {
+    await db.insert(nodes).values(
+      nodesData.map((n) => ({
+        id: n.id,
+        mindmapId: mapId,
+        label: n.label,
+        description: n.description || '',
+        xPos: n.xPos,
+        yPos: n.yPos,
+        color: n.color || '#2563eb',
+        metadata: n.metadata || {},
+      }))
+    );
+  }
 
-    // Insert new edges
-    if (edgesData.length > 0) {
-      await tx.insert(edges).values(
-        edgesData.map((e) => ({
-          id: e.id,
-          mindmapId: mapId,
-          sourceNodeId: e.sourceNodeId,
-          targetNodeId: e.targetNodeId,
-          label: e.label || '',
-          edgeType: e.edgeType || 'smoothstep',
-        }))
-      );
-    }
+  // Insert new edges
+  if (edgesData.length > 0) {
+    await db.insert(edges).values(
+      edgesData.map((e) => ({
+        id: e.id,
+        mindmapId: mapId,
+        sourceNodeId: e.sourceNodeId,
+        targetNodeId: e.targetNodeId,
+        label: e.label || '',
+        edgeType: e.edgeType || 'smoothstep',
+      }))
+    );
+  }
 
-    // Update map updatedAt timestamp
-    await tx
-      .update(mindmaps)
-      .set({ updatedAt: new Date() })
-      .where(eq(mindmaps.id, mapId));
-  });
+  // Update map updatedAt timestamp
+  await db
+    .update(mindmaps)
+    .set({ updatedAt: new Date() })
+    .where(eq(mindmaps.id, mapId));
 
   return { success: true };
 }
