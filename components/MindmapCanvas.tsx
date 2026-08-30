@@ -20,6 +20,7 @@ import { SkillNode } from './SkillNode';
 import { SkillEdge } from './SkillEdge';
 import { saveMapData } from '@/app/actions/nodes-edges';
 import { renameMindmap } from '@/app/actions/mindmaps';
+import { computeD3Layout } from '@/lib/layout';
 import { exportJson, ReactFlowNode, ReactFlowEdge } from '@/lib/adapters/json';
 import { generateOpml, parseOpml } from '@/lib/adapters/opml';
 import { generateFreeMind, parseFreeMind } from '@/lib/adapters/freemind';
@@ -114,6 +115,13 @@ export default function MindmapCanvas({
   const [aiType, setAiType] = useState<'child' | 'parent' | 'sibling'>('child');
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+
+  // AI List Importer States
+  const [isAiImportOpen, setIsAiImportOpen] = useState(false);
+  const [aiImportText, setAiImportText] = useState('');
+  const [aiImportMode, setAiImportMode] = useState<'merge' | 'replace'>('merge');
+  const [aiImportPending, setAiImportPending] = useState(false);
+  const [aiImportError, setAiImportError] = useState<string | null>(null);
 
   // Load selected node fields into form
   useEffect(() => {
@@ -469,6 +477,113 @@ export default function MindmapCanvas({
     }
   };
 
+  // Submit handler for AI List Importer Modal
+  const handleAiImportSubmit = async () => {
+    if (!aiImportText.trim()) return;
+
+    setAiImportPending(true);
+    setAiImportError(null);
+
+    try {
+      const response = await fetch('/api/ai/generate-map', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: aiImportText }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to fetch suggestions from AI service');
+      }
+
+      interface AINode {
+        id: string;
+        label: string;
+        description: string;
+      }
+
+      interface AIEdge {
+        source: string;
+        target: string;
+      }
+
+      const rawNodes = data.nodes as AINode[];
+      const rawEdges = data.edges as AIEdge[];
+
+      // Compute visual layout coordinates via D3 helper
+      const positionedNodes = computeD3Layout(rawNodes, rawEdges, 'TB');
+
+      if (aiImportMode === 'replace') {
+        // Option 1: Replace active canvas state
+        setNodes(positionedNodes);
+        
+        const nextEdges = rawEdges.map((e: AIEdge, index: number) => ({
+          id: `e-${index}-${uuidv4().substring(0, 8)}`,
+          source: e.source,
+          target: e.target,
+          type: 'skill',
+        }));
+        setEdges(nextEdges);
+        setSelectedNode(null);
+
+      } else {
+        // Option 2: Merge / Append to active canvas state
+        const mergePrefix = `ai-${uuidv4().substring(0, 8)}-`;
+
+        // Offset layout coordinates to center the new sub-graph near selected node if possible
+        const offset = selectedNode 
+          ? { x: selectedNode.position.x + 350, y: selectedNode.position.y }
+          : { x: 100, y: 100 };
+
+        const mergedNodes = positionedNodes.map((n) => ({
+          id: `${mergePrefix}${n.id}`,
+          type: n.type,
+          position: {
+            x: n.position.x + offset.x,
+            y: n.position.y + offset.y,
+          },
+          data: n.data,
+        }));
+
+        const mergedEdges = rawEdges.map((e: AIEdge, index: number) => ({
+          id: `e-merge-${index}-${uuidv4().substring(0, 8)}`,
+          source: `${mergePrefix}${e.source}`,
+          target: `${mergePrefix}${e.target}`,
+          type: 'skill',
+        }));
+
+        // Link new root node to selected node if a node is selected
+        if (selectedNode) {
+          // Identify root nodes within the new sub-graph
+          const targetIds = new Set(rawEdges.map((e: AIEdge) => e.target));
+          const subGraphRoots = rawNodes.filter((n: AINode) => !targetIds.has(n.id));
+
+          subGraphRoots.forEach((r: AINode) => {
+            mergedEdges.push({
+              id: `e-link-${uuidv4().substring(0, 8)}`,
+              source: selectedNode.id,
+              target: `${mergePrefix}${r.id}`,
+              type: 'skill',
+            });
+          });
+        }
+
+        setNodes((nds) => nds.concat(mergedNodes));
+        setEdges((eds) => eds.concat(mergedEdges));
+      }
+
+      setIsAiImportOpen(false);
+      setAiImportText('');
+      setAiImportError(null);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setAiImportError(errMsg || 'An error occurred during AI import.');
+    } finally {
+      setAiImportPending(false);
+    }
+  };
+
   // Promote suggestion to node
   const handlePromoteSuggestion = (sug: AISuggestion) => {
     if (!selectedNode) return;
@@ -611,6 +726,13 @@ export default function MindmapCanvas({
             </div>
 
             {/* Import Actions */}
+            <button
+              onClick={() => setIsAiImportOpen(true)}
+              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold text-xs px-2.5 py-1.5 rounded-lg transition"
+              title="Build map automatically from text list using AI"
+            >
+              ✨ AI List Import
+            </button>
             <label className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-2 py-1.5 rounded-lg cursor-pointer transition">
               Import OPML
               <input 
@@ -782,6 +904,82 @@ export default function MindmapCanvas({
                 ))}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {isAiImportOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-100 animate-in fade-in zoom-in duration-150">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-4">
+              <h3 className="font-bold text-slate-900 text-lg flex items-center gap-1.5">
+                <span>✨</span> AI List-to-Map Importer
+              </h3>
+              <button 
+                onClick={() => { setIsAiImportOpen(false); setAiImportText(''); setAiImportError(null); }}
+                className="text-slate-400 hover:text-slate-600 text-sm font-medium"
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+              Paste a raw list of skills, topics, or components. Our AI copilot will analyze their dependencies, derive prerequisites, and arrange them cleanly on your canvas.
+            </p>
+
+            {aiImportError && (
+              <div className="bg-red-50 text-red-600 text-xs p-2.5 rounded-lg border border-red-100 mb-4">
+                ⚠️ {aiImportError}
+              </div>
+            )}
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                  Skills / Topics List
+                </label>
+                <textarea
+                  value={aiImportText}
+                  onChange={(e) => setAiImportText(e.target.value)}
+                  placeholder="E.g., HTML, CSS, JavaScript, React, Tailwind CSS, TypeScript, Next.js"
+                  rows={4}
+                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  disabled={aiImportPending}
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                  Import Action
+                </label>
+                <select
+                  value={aiImportMode}
+                  onChange={(e) => setAiImportMode(e.target.value as 'merge' | 'replace')}
+                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  disabled={aiImportPending}
+                >
+                  <option value="merge">Merge (Append & connect new nodes to this map)</option>
+                  <option value="replace">Replace (Clear current canvas & start fresh)</option>
+                </select>
+              </div>
+
+              <div className="pt-2 flex gap-2">
+                <button
+                  onClick={handleAiImportSubmit}
+                  disabled={aiImportPending || !aiImportText.trim()}
+                  className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm py-2.5 rounded-lg transition disabled:bg-indigo-300"
+                >
+                  {aiImportPending ? 'AI is mapping concepts...' : 'Generate and Import'}
+                </button>
+                <button
+                  onClick={() => { setIsAiImportOpen(false); setAiImportText(''); setAiImportError(null); }}
+                  className="border border-slate-200 hover:bg-slate-50 text-slate-600 font-semibold text-sm py-2.5 px-4 rounded-lg transition"
+                  disabled={aiImportPending}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
