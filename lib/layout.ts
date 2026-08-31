@@ -25,10 +25,17 @@ export interface PositionedNode {
   };
 }
 
+export type LayoutDirection = 'TB' | 'LR' | 'RADIAL_MINDMAP' | 'RADIAL_360' | 'RADIAL_COMPACT' | 'RADIAL_EXPANDED';
+
+interface HierarchyItem {
+  id: string;
+  children?: HierarchyItem[];
+}
+
 export function computeD3Layout(
   inputNodes: LayoutNodeInput[],
   inputEdges: LayoutEdgeInput[],
-  direction: 'TB' | 'LR' | 'RADIAL_COMPACT' | 'RADIAL_EXPANDED' = 'TB'
+  direction: LayoutDirection = 'TB'
 ): PositionedNode[] {
   if (inputNodes.length === 0) return [];
 
@@ -36,7 +43,7 @@ export function computeD3Layout(
   const targetToPrimaryParent = new Map<string, string>();
   const parentToChildren = new Map<string, string[]>();
 
-  // Establish parent-child relationships, picking first link as primary parent to build strict D3 hierarchy
+  // Establish parent-child relationships (single parent per node to form valid trees)
   inputEdges.forEach((edge) => {
     const { source, target } = edge;
     if (nodeIds.has(source) && nodeIds.has(target) && !targetToPrimaryParent.has(target)) {
@@ -50,92 +57,194 @@ export function computeD3Layout(
   // Identify root nodes (nodes with no parents)
   const roots = inputNodes.filter((n) => !targetToPrimaryParent.has(n.id));
   if (roots.length === 0 && inputNodes.length > 0) {
-    // Cyclic safety: fallback first node as root if cycle detected
+    // Cyclic fallback: pick first node as root
     roots.push(inputNodes[0]);
   }
 
-  interface D3HierarchyNode {
-    id: string;
-    children?: D3HierarchyNode[];
-  }
-
-  const buildHierarchyNode = (nodeId: string, visited: Set<string>): D3HierarchyNode => {
+  const buildHierarchyItem = (nodeId: string, visited: Set<string>): HierarchyItem => {
     visited.add(nodeId);
     const childIds = parentToChildren.get(nodeId) || [];
-    const childrenNodes: D3HierarchyNode[] = [];
+    const childrenItems: HierarchyItem[] = [];
 
     childIds.forEach((cid) => {
       if (!visited.has(cid)) {
-        childrenNodes.push(buildHierarchyNode(cid, visited));
+        childrenItems.push(buildHierarchyItem(cid, visited));
       }
     });
 
-    return childrenNodes.length > 0 ? { id: nodeId, children: childrenNodes } : { id: nodeId };
+    return childrenItems.length > 0 ? { id: nodeId, children: childrenItems } : { id: nodeId };
   };
 
-  const globalVisited = new Set<string>();
-  let rootHierarchyData: D3HierarchyNode;
-
-  if (roots.length === 1) {
-    rootHierarchyData = buildHierarchyNode(roots[0].id, globalVisited);
-  } else {
-    // Single virtual root parent to bundle multiple disconnected sub-trees
-    rootHierarchyData = {
-      id: 'virtual-root',
-      children: roots.map((r) => buildHierarchyNode(r.id, globalVisited)),
-    };
-  }
-
-  // Define spacing sizes
-  const isRadial = direction.startsWith('RADIAL');
-  const siblingSpacing = isRadial ? 150 : 300;
-  const levelSpacing = isRadial ? 100 : 200;
-
-  const d3Root = d3.hierarchy<D3HierarchyNode>(rootHierarchyData);
-  const treeLayout = d3.tree<D3HierarchyNode>().nodeSize([siblingSpacing, levelSpacing]);
-  const rootPointNode = treeLayout(d3Root);
-
-  // Map coordinates out of layout
   const coordsMap = new Map<string, { x: number; y: number }>();
 
-  if (isRadial) {
-    const rStep = direction === 'RADIAL_COMPACT' ? 160 : 280;
-    
-    // Find min/max X of non-virtual descendants to normalize angles
-    let minX = Infinity;
-    let maxX = -Infinity;
-    rootPointNode.descendants().forEach((d) => {
-      if (d.data.id !== 'virtual-root') {
-        if (d.x < minX) minX = d.x;
-        if (d.x > maxX) maxX = d.x;
-      }
+  // Backward compatibility alias: RADIAL_COMPACT and RADIAL_EXPANDED map to RADIAL_MINDMAP and RADIAL_360
+  const normalizedDirection: LayoutDirection =
+    direction === 'RADIAL_COMPACT' ? 'RADIAL_MINDMAP' :
+    direction === 'RADIAL_EXPANDED' ? 'RADIAL_360' : direction;
+
+  // -------------------------------------------------------------
+  // 1. BI-DIRECTIONAL MIND MAP (RADIAL_MINDMAP)
+  // Left/Right symmetric split radiating from center (0, 0)
+  // -------------------------------------------------------------
+  if (normalizedDirection === 'RADIAL_MINDMAP') {
+    const primaryRootId = roots[0].id;
+    coordsMap.set(primaryRootId, { x: 0, y: 0 });
+
+    const visited = new Set<string>([primaryRootId]);
+    const rootDirectChildren = parentToChildren.get(primaryRootId) || [];
+
+    // If multiple roots exist, treat other roots as primary branches
+    const allPrimaryBranches = [
+      ...rootDirectChildren,
+      ...roots.slice(1).map((r) => r.id),
+    ];
+
+    if (allPrimaryBranches.length > 0) {
+      const half = Math.ceil(allPrimaryBranches.length / 2);
+      const rightBranchIds = allPrimaryBranches.slice(0, half);
+      const leftBranchIds = allPrimaryBranches.slice(half);
+
+      // Helper to layout one side
+      const layoutSide = (branchIds: string[], isRight: boolean) => {
+        if (branchIds.length === 0) return;
+
+        const virtualSideRoot: HierarchyItem = {
+          id: isRight ? 'virtual-right' : 'virtual-left',
+          children: branchIds.map((id) => buildHierarchyItem(id, visited)),
+        };
+
+        const d3SideRoot = d3.hierarchy<HierarchyItem>(virtualSideRoot);
+        // Sibling vertical spacing: 110px, Level horizontal spacing: 320px
+        const tree = d3.tree<HierarchyItem>().nodeSize([110, 320]);
+        const pointRoot = tree(d3SideRoot);
+
+        pointRoot.descendants().forEach((d) => {
+          if (!d.data.id.startsWith('virtual-')) {
+            const posX = isRight ? d.y : -d.y;
+            const posY = d.x;
+            coordsMap.set(d.data.id, { x: posX, y: posY });
+          }
+        });
+      };
+
+      layoutSide(rightBranchIds, true);
+      layoutSide(leftBranchIds, false);
+    }
+  }
+
+  // -------------------------------------------------------------
+  // 2. RADIAL 360° (RADIAL_360)
+  // True 360-degree radiating circular starburst with non-overlapping angular sectors
+  // -------------------------------------------------------------
+  else if (normalizedDirection === 'RADIAL_360') {
+    const globalVisited = new Set<string>();
+    let rootHierarchy: HierarchyItem;
+
+    if (roots.length === 1) {
+      rootHierarchy = buildHierarchyItem(roots[0].id, globalVisited);
+    } else {
+      rootHierarchy = {
+        id: 'virtual-root',
+        children: roots.map((r) => buildHierarchyItem(r.id, globalVisited)),
+      };
+    }
+
+    const d3Root = d3.hierarchy<HierarchyItem>(rootHierarchy);
+
+    // Compute leaf count for each node (for proportional angular allocation)
+    d3Root.count(); // Sets d.value to number of leaves in subtree
+    const totalLeaves = d3Root.value || 1;
+
+    // Find max depth of tree
+    let maxDepth = 1;
+    d3Root.descendants().forEach((d) => {
+      if (d.depth > maxDepth) maxDepth = d.depth;
     });
 
-    const xRange = maxX - minX || 1;
+    // Dynamic radius sizing to guarantee no overlapping cards on any circle
+    // Each leaf card is 240px wide. Circumference = leaves * 250px
+    const minCircumferenceRadius = (totalLeaves * 250) / (2 * Math.PI);
+    const baseStep = 320;
+    const radiusStep = Math.max(baseStep, minCircumferenceRadius / maxDepth);
 
-    rootPointNode.descendants().forEach((d) => {
-      if (d.data.id !== 'virtual-root') {
-        // Map x to angle [0, 2 * Math.PI]
-        const angle = ((d.x - minX) / xRange) * 2 * Math.PI;
-        // Radius is proportional to depth in the tree layout
-        const radius = d.depth * rStep;
-        
-        coordsMap.set(d.data.id, {
-          x: radius * Math.cos(angle),
-          y: radius * Math.sin(angle),
+    // Recursive angular sector assignment
+    const assignAngularSector = (
+      node: d3.HierarchyNode<HierarchyItem>,
+      startAngle: number,
+      endAngle: number
+    ) => {
+      const midAngle = (startAngle + endAngle) / 2;
+      const isVirtual = node.data.id === 'virtual-root';
+
+      if (!isVirtual) {
+        const radius = node.depth * radiusStep;
+        coordsMap.set(node.data.id, {
+          x: radius * Math.cos(midAngle),
+          y: radius * Math.sin(midAngle),
         });
       }
-    });
-  } else {
-    rootPointNode.descendants().forEach((d) => {
-      if (d.data.id !== 'virtual-root') {
-        if (direction === 'TB') {
-          coordsMap.set(d.data.id, { x: d.x, y: d.y });
-        } else {
+
+      if (node.children && node.children.length > 0) {
+        const totalChildValue = node.children.reduce((sum, c) => sum + (c.value || 1), 0);
+        let currentAngle = startAngle;
+        const totalSectorSpan = endAngle - startAngle;
+
+        node.children.forEach((child) => {
+          const childValue = child.value || 1;
+          const childSpan = (childValue / totalChildValue) * totalSectorSpan;
+          assignAngularSector(child, currentAngle, currentAngle + childSpan);
+          currentAngle += childSpan;
+        });
+      }
+    };
+
+    assignAngularSector(d3Root, 0, 2 * Math.PI);
+
+    // If single root, place root at (0, 0)
+    if (roots.length === 1) {
+      coordsMap.set(roots[0].id, { x: 0, y: 0 });
+    }
+  }
+
+  // -------------------------------------------------------------
+  // 3. VERTICAL (TB) & HORIZONTAL (LR) LAYOUTS
+  // -------------------------------------------------------------
+  else {
+    const globalVisited = new Set<string>();
+    let rootHierarchy: HierarchyItem;
+
+    if (roots.length === 1) {
+      rootHierarchy = buildHierarchyItem(roots[0].id, globalVisited);
+    } else {
+      rootHierarchy = {
+        id: 'virtual-root',
+        children: roots.map((r) => buildHierarchyItem(r.id, globalVisited)),
+      };
+    }
+
+    const d3Root = d3.hierarchy<HierarchyItem>(rootHierarchy);
+
+    if (normalizedDirection === 'LR') {
+      // Sibling vertical spacing: 110px, Level horizontal spacing: 320px
+      const treeLayout = d3.tree<HierarchyItem>().nodeSize([110, 320]);
+      const pointRoot = treeLayout(d3Root);
+
+      pointRoot.descendants().forEach((d) => {
+        if (d.data.id !== 'virtual-root') {
           coordsMap.set(d.data.id, { x: d.y, y: d.x });
         }
-      }
-    });
+      });
+    } else {
+      // TB (Top to Bottom): Sibling horizontal spacing: 280px, Level vertical spacing: 160px
+      const treeLayout = d3.tree<HierarchyItem>().nodeSize([280, 160]);
+      const pointRoot = treeLayout(d3Root);
+
+      pointRoot.descendants().forEach((d) => {
+        if (d.data.id !== 'virtual-root') {
+          coordsMap.set(d.data.id, { x: d.x, y: d.y });
+        }
+      });
+    }
   }
 
   // Re-map nodes to React Flow syntax with positions
@@ -144,7 +253,7 @@ export function computeD3Layout(
     return {
       id: n.id,
       type: 'skill',
-      position: { x: coords.x, y: coords.y },
+      position: { x: Math.round(coords.x), y: Math.round(coords.y) },
       data: {
         label: n.label,
         description: n.description || '',
