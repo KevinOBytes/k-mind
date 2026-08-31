@@ -3,7 +3,7 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 /* eslint-disable react-hooks/purity */
 
-import React, { useState, useCallback, useEffect, useTransition } from 'react';
+import React, { useState, useCallback, useEffect, useTransition, useMemo } from 'react';
 import {
   ReactFlow,
   Background,
@@ -24,7 +24,6 @@ import { computeD3Layout } from '@/lib/layout';
 import { exportJson, ReactFlowNode, ReactFlowEdge } from '@/lib/adapters/json';
 import { generateOpml, parseOpml } from '@/lib/adapters/opml';
 import { generateFreeMind, parseFreeMind } from '@/lib/adapters/freemind';
-import * as d3 from 'd3-hierarchy';
 import { v4 as uuidv4 } from 'uuid';
 
 const nodeTypes = {
@@ -141,6 +140,79 @@ export default function MindmapCanvas({
       setAiError(null);
     }
   }, [selectedNode]);
+
+  // Compute visible elements based on collapsed nodes state
+  const { visibleNodes, visibleEdges } = useMemo(() => {
+    const parentIds = new Set(edges.map((e) => e.source));
+    const hydratedNodes = nodes.map((node) => {
+      const hasChildren = parentIds.has(node.id);
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          hasChildren,
+          collapsed: !!(node.data as { collapsed?: boolean })?.collapsed,
+          onToggleCollapse: (nodeId: string) => {
+            setNodes((nds) =>
+              nds.map((n) => {
+                if (n.id === nodeId) {
+                  return {
+                    ...n,
+                    data: {
+                      ...n.data,
+                      collapsed: !(n.data as { collapsed?: boolean })?.collapsed,
+                    },
+                  };
+                }
+                return n;
+              })
+            );
+          },
+        },
+      };
+    });
+
+    const collapsedNodeIds = new Set<string>();
+    hydratedNodes.forEach((n) => {
+      if (n.data?.collapsed) {
+        collapsedNodeIds.add(n.id);
+      }
+    });
+
+    if (collapsedNodeIds.size === 0) {
+      return { visibleNodes: hydratedNodes, visibleEdges: edges };
+    }
+
+    const hiddenNodeIds = new Set<string>();
+    const parentToChildren = new Map<string, string[]>();
+    
+    edges.forEach((edge) => {
+      const children = parentToChildren.get(edge.source) || [];
+      children.push(edge.target);
+      parentToChildren.set(edge.source, children);
+    });
+
+    const hideDescendants = (nodeId: string) => {
+      const children = parentToChildren.get(nodeId) || [];
+      children.forEach((childId) => {
+        if (!hiddenNodeIds.has(childId)) {
+          hiddenNodeIds.add(childId);
+          hideDescendants(childId);
+        }
+      });
+    };
+
+    collapsedNodeIds.forEach((id) => {
+      hideDescendants(id);
+    });
+
+    const visibleNodes = hydratedNodes.filter((n) => !hiddenNodeIds.has(n.id));
+    const visibleEdges = edges.filter(
+      (e) => !hiddenNodeIds.has(e.source) && !hiddenNodeIds.has(e.target)
+    );
+
+    return { visibleNodes, visibleEdges };
+  }, [nodes, edges, setNodes]);
 
   // Node selection handler
   const onNodeClick = useCallback((_: React.MouseEvent | TouchEvent, node: Node) => {
@@ -273,97 +345,35 @@ export default function MindmapCanvas({
   };
 
   // Auto layout using D3 Hierarchy
-  const applyD3Layout = (direction: 'TB' | 'LR') => {
+  const applyD3Layout = (direction: 'TB' | 'LR' | 'RADIAL_COMPACT' | 'RADIAL_EXPANDED') => {
     if (nodes.length === 0) return;
 
-    // 1. Identify all parents and build relationship map
-    // Keep track of visited parents per node to only assign the first/primary parent (strict tree rule)
-    const nodeIds = new Set(nodes.map((n) => n.id));
-    const targetToPrimaryParent = new Map<string, string>();
-    const parentToChildren = new Map<string, string[]>();
+    const layoutNodes = nodes.map((n) => ({
+      id: n.id,
+      label: (n.data.label as string) || '',
+      description: (n.data.description as string) || '',
+      color: (n.data.color as string) || '#2563eb',
+      status: (n.data.status as string) || 'planned',
+    }));
 
-    edges.forEach((edge) => {
-      const source = edge.source;
-      const target = edge.target;
-      // Ensure nodes exist and we haven't assigned a primary parent for this target node yet
-      if (nodeIds.has(source) && nodeIds.has(target) && !targetToPrimaryParent.has(target)) {
-        targetToPrimaryParent.set(target, source);
-        const children = parentToChildren.get(source) || [];
-        children.push(target);
-        parentToChildren.set(source, children);
-      }
-    });
+    const layoutEdges = edges.map((e) => ({
+      source: e.source,
+      target: e.target,
+    }));
 
-    // 2. Identify root nodes (nodes with no primary parent)
-    const roots = nodes.filter((n) => !targetToPrimaryParent.has(n.id));
-    if (roots.length === 0) return; // cyclic graph safety
-
-    // 3. Build recursive hierarchy structure
-    interface LayoutNode {
-      id: string;
-      children?: LayoutNode[];
-    }
-
-    const buildHierarchyNode = (nodeId: string, visited: Set<string>): LayoutNode => {
-      visited.add(nodeId);
-      const childIds = parentToChildren.get(nodeId) || [];
-      const childrenNodes: LayoutNode[] = [];
-
-      childIds.forEach((cid) => {
-        if (!visited.has(cid)) {
-          childrenNodes.push(buildHierarchyNode(cid, visited));
-        }
-      });
-
-      return childrenNodes.length > 0 ? { id: nodeId, children: childrenNodes } : { id: nodeId };
-    };
-
-    const globalVisited = new Set<string>();
-    let rootHierarchyData: LayoutNode;
-
-    if (roots.length === 1) {
-      rootHierarchyData = buildHierarchyNode(roots[0].id, globalVisited);
-    } else {
-      // Wrap multiple roots under a single virtual root
-      rootHierarchyData = {
-        id: 'virtual-root',
-        children: roots.map((r) => buildHierarchyNode(r.id, globalVisited)),
-      };
-    }
-
-    // 4. Run D3 tree layout
-    const siblingSpacing = 300;
-    const levelSpacing = 200;
-
-    const d3Root = d3.hierarchy<LayoutNode>(rootHierarchyData);
-    const treeLayout = d3.tree<LayoutNode>().nodeSize([siblingSpacing, levelSpacing]);
-    treeLayout(d3Root);
-
-    // 5. Build coordinates map
+    const positioned = computeD3Layout(layoutNodes, layoutEdges, direction);
     const coordsMap = new Map<string, { x: number; y: number }>();
-    d3Root.descendants().forEach((d) => {
-      if (d.data.id !== 'virtual-root') {
-        if (direction === 'TB') {
-          // Vertical Layout
-          coordsMap.set(d.data.id, { x: d.x ?? 0, y: d.y ?? 0 });
-        } else {
-          // Horizontal Layout
-          coordsMap.set(d.data.id, { x: d.y ?? 0, y: d.x ?? 0 });
-        }
-      }
+    positioned.forEach((p) => {
+      coordsMap.set(p.id, p.position);
     });
 
-    // 6. Map coordinates back to React Flow nodes state
     setNodes((nds) =>
       nds.map((node) => {
         const coords = coordsMap.get(node.id);
         if (coords) {
           return {
             ...node,
-            position: {
-              x: coords.x,
-              y: coords.y,
-            },
+            position: coords,
           };
         }
         return node;
@@ -632,8 +642,8 @@ export default function MindmapCanvas({
       {/* Workspace Panel */}
       <div className="flex-1 h-full relative">
         <ReactFlow
-          nodes={nodes}
-          edges={edges}
+          nodes={visibleNodes}
+          edges={visibleEdges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
@@ -696,6 +706,20 @@ export default function MindmapCanvas({
               title="Arrange nodes from Left to Right"
             >
               ➡️ Horizontal Layout
+            </button>
+            <button 
+              onClick={() => applyD3Layout('RADIAL_COMPACT')}
+              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
+              title="Arrange nodes in a Compact Circular Radial map"
+            >
+              ⭕ Radial Compact
+            </button>
+            <button 
+              onClick={() => applyD3Layout('RADIAL_EXPANDED')}
+              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
+              title="Arrange nodes in an Expanded Circular Radial map"
+            >
+              🌐 Radial Expanded
             </button>
 
             <div className="w-px h-6 bg-slate-200 mx-1"></div>
