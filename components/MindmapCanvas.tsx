@@ -20,7 +20,7 @@ import { SkillNode } from './SkillNode';
 import { SkillEdge } from './SkillEdge';
 import { saveMapData } from '@/app/actions/nodes-edges';
 import { renameMindmap } from '@/app/actions/mindmaps';
-import { computeD3Layout } from '@/lib/layout';
+import { computeD3Layout, LayoutDirection } from '@/lib/layout';
 import { exportJson, ReactFlowNode, ReactFlowEdge } from '@/lib/adapters/json';
 import { generateOpml, parseOpml } from '@/lib/adapters/opml';
 import { generateFreeMind, parseFreeMind } from '@/lib/adapters/freemind';
@@ -345,7 +345,7 @@ export default function MindmapCanvas({
   };
 
   // Auto layout using D3 Hierarchy
-  const applyD3Layout = (direction: 'TB' | 'LR' | 'RADIAL_COMPACT' | 'RADIAL_EXPANDED') => {
+  const applyD3Layout = (direction: LayoutDirection) => {
     if (nodes.length === 0) return;
 
     const layoutNodes = nodes.map((n) => ({
@@ -694,32 +694,32 @@ export default function MindmapCanvas({
               + Add Node
             </button>
             <button 
+              onClick={() => applyD3Layout('RADIAL_MINDMAP')}
+              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
+              title="Classic balanced Mind Map radiating symmetrically from center"
+            >
+              🧠 Mind Map
+            </button>
+            <button 
+              onClick={() => applyD3Layout('RADIAL_360')}
+              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
+              title="Full 360-degree circular starburst with automatic collision-free radius scaling"
+            >
+              🌐 Radial 360°
+            </button>
+            <button 
               onClick={() => applyD3Layout('TB')}
               className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
-              title="Arrange nodes from Top to Bottom"
+              title="Hierarchical tree from Top to Bottom"
             >
-              ⬇️ Vertical Layout
+              ⬇️ Vertical
             </button>
             <button 
               onClick={() => applyD3Layout('LR')}
               className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
-              title="Arrange nodes from Left to Right"
+              title="Logic chart from Left to Right"
             >
-              ➡️ Horizontal Layout
-            </button>
-            <button 
-              onClick={() => applyD3Layout('RADIAL_COMPACT')}
-              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
-              title="Arrange nodes in a Compact Circular Radial map"
-            >
-              ⭕ Radial Compact
-            </button>
-            <button 
-              onClick={() => applyD3Layout('RADIAL_EXPANDED')}
-              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
-              title="Arrange nodes in an Expanded Circular Radial map"
-            >
-              🌐 Radial Expanded
+              ➡️ Horizontal
             </button>
 
             <div className="w-px h-6 bg-slate-200 mx-1"></div>
