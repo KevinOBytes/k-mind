@@ -6,9 +6,12 @@ export type SkillNodeData = Node<{
   description?: string;
   color?: string;
   status?: 'planned' | 'in_progress' | 'completed';
+  collapsed?: boolean;
+  hasChildren?: boolean;
+  onToggleCollapse?: (id: string) => void;
 }, 'skill'>;
 
-export const SkillNode = memo(({ data, selected }: NodeProps<SkillNodeData>) => {
+export const SkillNode = memo(({ id, data, selected }: NodeProps<SkillNodeData>) => {
   const color = data.color || '#2563eb';
   const status = data.status || 'planned';
 
@@ -80,6 +83,19 @@ export const SkillNode = memo(({ data, selected }: NodeProps<SkillNodeData>) => 
           </p>
         )}
       </div>
+
+      {data.hasChildren && data.onToggleCollapse && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            data.onToggleCollapse?.(id);
+          }}
+          className="absolute -bottom-2.5 left-1/2 -translate-x-1/2 w-5 h-5 bg-white border border-slate-200 rounded-full flex items-center justify-center text-[10px] font-bold text-slate-600 shadow-sm hover:border-slate-300 hover:text-slate-800 transition cursor-pointer z-10"
+          title={data.collapsed ? 'Expand branch' : 'Collapse branch'}
+        >
+          {data.collapsed ? '＋' : '－'}
+        </button>
+      )}
     </div>
   );
 });

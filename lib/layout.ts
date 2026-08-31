@@ -28,7 +28,7 @@ export interface PositionedNode {
 export function computeD3Layout(
   inputNodes: LayoutNodeInput[],
   inputEdges: LayoutEdgeInput[],
-  direction: 'TB' | 'LR' = 'TB'
+  direction: 'TB' | 'LR' | 'RADIAL_COMPACT' | 'RADIAL_EXPANDED' = 'TB'
 ): PositionedNode[] {
   if (inputNodes.length === 0) return [];
 
@@ -87,24 +87,56 @@ export function computeD3Layout(
   }
 
   // Define spacing sizes
-  const siblingSpacing = 300;
-  const levelSpacing = 200;
+  const isRadial = direction.startsWith('RADIAL');
+  const siblingSpacing = isRadial ? 150 : 300;
+  const levelSpacing = isRadial ? 100 : 200;
 
   const d3Root = d3.hierarchy<D3HierarchyNode>(rootHierarchyData);
   const treeLayout = d3.tree<D3HierarchyNode>().nodeSize([siblingSpacing, levelSpacing]);
-  treeLayout(d3Root);
+  const rootPointNode = treeLayout(d3Root);
 
   // Map coordinates out of layout
   const coordsMap = new Map<string, { x: number; y: number }>();
-  d3Root.descendants().forEach((d) => {
-    if (d.data.id !== 'virtual-root') {
-      if (direction === 'TB') {
-        coordsMap.set(d.data.id, { x: d.x ?? 0, y: d.y ?? 0 });
-      } else {
-        coordsMap.set(d.data.id, { x: d.y ?? 0, y: d.x ?? 0 });
+
+  if (isRadial) {
+    const rStep = direction === 'RADIAL_COMPACT' ? 160 : 280;
+    
+    // Find min/max X of non-virtual descendants to normalize angles
+    let minX = Infinity;
+    let maxX = -Infinity;
+    rootPointNode.descendants().forEach((d) => {
+      if (d.data.id !== 'virtual-root') {
+        if (d.x < minX) minX = d.x;
+        if (d.x > maxX) maxX = d.x;
       }
-    }
-  });
+    });
+
+    const xRange = maxX - minX || 1;
+
+    rootPointNode.descendants().forEach((d) => {
+      if (d.data.id !== 'virtual-root') {
+        // Map x to angle [0, 2 * Math.PI]
+        const angle = ((d.x - minX) / xRange) * 2 * Math.PI;
+        // Radius is proportional to depth in the tree layout
+        const radius = d.depth * rStep;
+        
+        coordsMap.set(d.data.id, {
+          x: radius * Math.cos(angle),
+          y: radius * Math.sin(angle),
+        });
+      }
+    });
+  } else {
+    rootPointNode.descendants().forEach((d) => {
+      if (d.data.id !== 'virtual-root') {
+        if (direction === 'TB') {
+          coordsMap.set(d.data.id, { x: d.x, y: d.y });
+        } else {
+          coordsMap.set(d.data.id, { x: d.y, y: d.x });
+        }
+      }
+    });
+  }
 
   // Re-map nodes to React Flow syntax with positions
   return inputNodes.map((n) => {
