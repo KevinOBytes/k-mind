@@ -3,7 +3,7 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 /* eslint-disable react-hooks/purity */
 
-import React, { useState, useCallback, useEffect, useTransition, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useTransition, useMemo, useRef } from 'react';
 import {
   ReactFlow,
   Background,
@@ -11,15 +11,20 @@ import {
   useEdgesState,
   addEdge,
   Node,
+  Edge,
   Panel,
   BackgroundVariant,
   OnConnect,
+  Controls,
+  MiniMap,
+  ReactFlowInstance,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+import { toPng } from 'html-to-image';
 import { SkillNode } from './SkillNode';
 import { SkillEdge } from './SkillEdge';
 import { saveMapData } from '@/app/actions/nodes-edges';
-import { renameMindmap } from '@/app/actions/mindmaps';
+import { renameMindmap, toggleMindmapPublic } from '@/app/actions/mindmaps';
 import { computeD3Layout, LayoutDirection } from '@/lib/layout';
 import { exportJson, ReactFlowNode, ReactFlowEdge } from '@/lib/adapters/json';
 import { generateOpml, parseOpml } from '@/lib/adapters/opml';
@@ -53,8 +58,10 @@ export interface CanvasEdgeInput {
 interface MindmapCanvasProps {
   mapId: string;
   initialTitle: string;
+  initialIsPublic?: boolean;
   initialNodes: CanvasNodeInput[];
   initialEdges: CanvasEdgeInput[];
+  readOnly?: boolean;
 }
 
 interface AISuggestion {
@@ -65,11 +72,13 @@ interface AISuggestion {
 export default function MindmapCanvas({
   mapId,
   initialTitle,
+  initialIsPublic = false,
   initialNodes,
   initialEdges,
+  readOnly = false,
 }: MindmapCanvasProps) {
   // Convert DB coordinates to React Flow node format
-  const formatInitialNodes = useCallback(() => {
+  const formatInitialNodes = useCallback((): Node[] => {
     return initialNodes.map((n) => {
       const meta = n.metadata as Record<string, unknown> | null;
       return {
@@ -86,7 +95,7 @@ export default function MindmapCanvas({
     });
   }, [initialNodes]);
 
-  const formatInitialEdges = useCallback(() => {
+  const formatInitialEdges = useCallback((): Edge[] => {
     return initialEdges.map((e) => ({
       id: e.id,
       source: e.sourceNodeId,
@@ -95,13 +104,28 @@ export default function MindmapCanvas({
     }));
   }, [initialEdges]);
 
-  const [nodes, setNodes, onNodesChange] = useNodesState(formatInitialNodes());
-  const [edges, setEdges, onEdgesChange] = useEdgesState(formatInitialEdges());
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>(formatInitialNodes());
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(formatInitialEdges());
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const [title, setTitle] = useState(initialTitle);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error'>('saved');
   const [, startTransition] = useTransition();
+
+  // Canvas Viewport & Minimap
+  const [rfInstance, setRfInstance] = useState<ReactFlowInstance | null>(null);
+  const [showMiniMap, setShowMiniMap] = useState(false);
+
+  // Undo / Redo Stack
+  const [history, setHistory] = useState<{ nodes: Node[]; edges: Edge[] }[]>([]);
+  const [future, setFuture] = useState<{ nodes: Node[]; edges: Edge[] }[]>([]);
+  const isHistoryAction = useRef(false);
+
+  // Public Sharing States
+  const [isPublic, setIsPublic] = useState(initialIsPublic);
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [isShareLoading, setIsShareLoading] = useState(false);
 
   // Selected Node fields for sidebar form
   const [nodeLabel, setNodeLabel] = useState('');
@@ -113,6 +137,7 @@ export default function MindmapCanvas({
   const [aiSuggestions, setAiSuggestions] = useState<AISuggestion[]>([]);
   const [aiType, setAiType] = useState<'child' | 'parent' | 'sibling'>('child');
   const [aiLoading, setAiLoading] = useState(false);
+  const [aiAutoExpanding, setAiAutoExpanding] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
 
   // AI List Importer States
@@ -122,12 +147,57 @@ export default function MindmapCanvas({
   const [aiImportPending, setAiImportPending] = useState(false);
   const [aiImportError, setAiImportError] = useState<string | null>(null);
 
+  // Record History State Helper
+  const recordHistory = useCallback(() => {
+    if (isHistoryAction.current || readOnly) return;
+    setHistory((prev) => [...prev.slice(-30), { nodes, edges }]);
+    setFuture([]);
+  }, [nodes, edges, readOnly]);
+
+  // Undo Handler
+  const handleUndo = useCallback(() => {
+    if (history.length === 0 || readOnly) return;
+    const previous = history[history.length - 1];
+    setHistory((prev) => prev.slice(0, prev.length - 1));
+    setFuture((prev) => [{ nodes, edges }, ...prev]);
+    isHistoryAction.current = true;
+    setNodes(previous.nodes);
+    setEdges(previous.edges);
+    setTimeout(() => {
+      isHistoryAction.current = false;
+    }, 50);
+  }, [history, nodes, edges, setNodes, setEdges, readOnly]);
+
+  // Redo Handler
+  const handleRedo = useCallback(() => {
+    if (future.length === 0 || readOnly) return;
+    const next = future[0];
+    setFuture((prev) => prev.slice(1));
+    setHistory((prev) => [...prev, { nodes, edges }]);
+    isHistoryAction.current = true;
+    setNodes(next.nodes);
+    setEdges(next.edges);
+    setTimeout(() => {
+      isHistoryAction.current = false;
+    }, 50);
+  }, [future, nodes, edges, setNodes, setEdges, readOnly]);
+
+  // Progress Stats Summary
+  const stats = useMemo(() => {
+    const total = nodes.length;
+    const completed = nodes.filter((n) => n.data.status === 'completed').length;
+    const inProgress = nodes.filter((n) => n.data.status === 'in_progress').length;
+    const planned = total - completed - inProgress;
+    const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+    return { total, completed, inProgress, planned, percent };
+  }, [nodes]);
+
   // Load selected node fields into form
   useEffect(() => {
     if (selectedNode) {
-      setNodeLabel(selectedNode.data.label as string || '');
-      setNodeDesc(selectedNode.data.description as string || '');
-      setNodeColor(selectedNode.data.color as string || '#2563eb');
+      setNodeLabel((selectedNode.data.label as string) || '');
+      setNodeDesc((selectedNode.data.description as string) || '');
+      setNodeColor((selectedNode.data.color as string) || '#2563eb');
       setNodeStatus((selectedNode.data.status as 'planned' | 'in_progress' | 'completed') || 'planned');
       setAiSuggestions([]);
       setAiError(null);
@@ -152,6 +222,22 @@ export default function MindmapCanvas({
           ...node.data,
           hasChildren,
           collapsed: !!(node.data as { collapsed?: boolean })?.collapsed,
+          readOnly,
+          onUpdateLabel: (nodeId: string, newLabel: string) => {
+            if (readOnly) return;
+            recordHistory();
+            setNodes((nds) =>
+              nds.map((n) => {
+                if (n.id === nodeId) {
+                  return {
+                    ...n,
+                    data: { ...n.data, label: newLabel },
+                  };
+                }
+                return n;
+              })
+            );
+          },
           onToggleCollapse: (nodeId: string) => {
             setNodes((nds) =>
               nds.map((n) => {
@@ -185,7 +271,7 @@ export default function MindmapCanvas({
 
     const hiddenNodeIds = new Set<string>();
     const parentToChildren = new Map<string, string[]>();
-    
+
     edges.forEach((edge) => {
       const children = parentToChildren.get(edge.source) || [];
       children.push(edge.target);
@@ -212,7 +298,7 @@ export default function MindmapCanvas({
     );
 
     return { visibleNodes, visibleEdges };
-  }, [nodes, edges, setNodes]);
+  }, [nodes, edges, setNodes, readOnly, recordHistory]);
 
   // Node selection handler
   const onNodeClick = useCallback((_: React.MouseEvent | TouchEvent, node: Node) => {
@@ -226,22 +312,25 @@ export default function MindmapCanvas({
   // Connect handler
   const onConnect: OnConnect = useCallback(
     (params) => {
-      const newEdge = {
+      if (readOnly) return;
+      recordHistory();
+      const newEdge: Edge = {
         ...params,
         id: `e-${uuidv4()}`,
         type: 'skill',
       };
       setEdges((eds) => addEdge(newEdge, eds));
     },
-    [setEdges]
+    [setEdges, readOnly, recordHistory]
   );
 
   // Auto-save logic triggers when nodes or edges change
   useEffect(() => {
+    if (readOnly) return;
     const delayDebounce = setTimeout(() => {
       if (nodes.length === 0) return;
       setSaveStatus('saving');
-      
+
       const nodesData = nodes.map((n) => ({
         id: n.id,
         label: n.data.label as string,
@@ -249,7 +338,7 @@ export default function MindmapCanvas({
         xPos: n.position.x,
         yPos: n.position.y,
         color: n.data.color as string,
-        metadata: { status: n.data.status },
+        metadata: { status: n.data.status, collapsed: n.data.collapsed },
       }));
 
       const edgesData = edges.map((e) => ({
@@ -269,11 +358,11 @@ export default function MindmapCanvas({
     }, 1500); // 1.5s debounce
 
     return () => clearTimeout(delayDebounce);
-  }, [nodes, edges, mapId]);
+  }, [nodes, edges, mapId, readOnly]);
 
   // Rename Map
   const handleRename = () => {
-    if (!title.trim()) return;
+    if (!title.trim() || readOnly) return;
     setIsEditingTitle(false);
     startTransition(async () => {
       await renameMindmap(mapId, title.trim());
@@ -282,6 +371,8 @@ export default function MindmapCanvas({
 
   // Add new Node
   const handleAddNode = () => {
+    if (readOnly) return;
+    recordHistory();
     const id = `n-${uuidv4()}`;
     const newNode = {
       id,
@@ -301,10 +392,93 @@ export default function MindmapCanvas({
     setSelectedNode(newNode as unknown as Node);
   };
 
+  // Add Child Node to currently selected node (Shortcut: Tab)
+  const handleAddChildNode = useCallback(
+    (parentId: string) => {
+      if (readOnly) return;
+      const parent = nodes.find((n) => n.id === parentId);
+      if (!parent) return;
+
+      recordHistory();
+      const newId = `n-${uuidv4()}`;
+      const newNode: Node = {
+        id: newId,
+        type: 'skill',
+        position: {
+          x: parent.position.x + 280,
+          y: parent.position.y + (Math.random() - 0.5) * 80,
+        },
+        data: {
+          label: 'New Sub-skill',
+          description: '',
+          color: (parent.data.color as string) || '#2563eb',
+          status: 'planned' as const,
+        },
+      };
+
+      const newEdge: Edge = {
+        id: `e-${uuidv4()}`,
+        source: parentId,
+        target: newId,
+        type: 'skill',
+      };
+
+      setNodes((nds) => nds.concat(newNode));
+      setEdges((eds) => eds.concat(newEdge));
+      setSelectedNode(newNode);
+    },
+    [nodes, setNodes, setEdges, readOnly, recordHistory]
+  );
+
+  // Add Sibling Node (Shortcut: Enter)
+  const handleAddSiblingNode = useCallback(
+    (nodeId: string) => {
+      if (readOnly) return;
+      const current = nodes.find((n) => n.id === nodeId);
+      if (!current) return;
+
+      const incomingEdge = edges.find((e) => e.target === nodeId);
+      const parentId = incomingEdge?.source;
+
+      recordHistory();
+      const newId = `n-${uuidv4()}`;
+      const newNode: Node = {
+        id: newId,
+        type: 'skill',
+        position: {
+          x: current.position.x,
+          y: current.position.y + 120,
+        },
+        data: {
+          label: 'New Sibling Skill',
+          description: '',
+          color: (current.data.color as string) || '#2563eb',
+          status: 'planned' as const,
+        },
+      };
+
+      setNodes((nds) => nds.concat(newNode));
+
+      if (parentId) {
+        const newEdge: Edge = {
+          id: `e-${uuidv4()}`,
+          source: parentId,
+          target: newId,
+          type: 'skill',
+        };
+        setEdges((eds) => eds.concat(newEdge));
+      }
+
+      setSelectedNode(newNode);
+    },
+    [nodes, edges, setNodes, setEdges, readOnly, recordHistory]
+  );
+
   // Update selected Node detail
   const handleUpdateNode = () => {
-    if (!selectedNode) return;
-    
+    if (!selectedNode || readOnly) return;
+    recordHistory();
+
     setNodes((nds) =>
       nds.map((node) => {
         if (node.id === selectedNode.id) {
@@ -323,30 +497,86 @@ export default function MindmapCanvas({
       })
     );
 
-    // Sync selected node layout variables so panel details mirror save values
-    setSelectedNode((prev) => prev ? {
-      ...prev,
-      data: {
-        ...prev.data,
-        label: nodeLabel,
-        description: nodeDesc,
-        color: nodeColor,
-        status: nodeStatus,
-      }
-    } : null);
+    setSelectedNode((prev) =>
+      prev
+        ? {
+            ...prev,
+            data: {
+              ...prev.data,
+              label: nodeLabel,
+              description: nodeDesc,
+              color: nodeColor,
+              status: nodeStatus,
+            },
+          }
+        : null
+    );
   };
 
-  // Delete selected Node
-  const handleDeleteNode = () => {
-    if (!selectedNode) return;
+  // Delete selected Node (Shortcut: Backspace / Delete)
+  const handleDeleteNode = useCallback(() => {
+    if (!selectedNode || readOnly) return;
+    recordHistory();
     setNodes((nds) => nds.filter((n) => n.id !== selectedNode.id));
     setEdges((eds) => eds.filter((e) => e.source !== selectedNode.id && e.target !== selectedNode.id));
     setSelectedNode(null);
-  };
+  }, [selectedNode, setNodes, setEdges, readOnly, recordHistory]);
 
-  // Auto layout using D3 Hierarchy
+  // Global Keyboard Shortcuts Listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return;
+      }
+
+      // Undo / Redo
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+        if (e.shiftKey) {
+          e.preventDefault();
+          handleRedo();
+        } else {
+          e.preventDefault();
+          handleUndo();
+        }
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+
+      // Tab -> Add Child Node
+      if (e.key === 'Tab' && selectedNode) {
+        e.preventDefault();
+        handleAddChildNode(selectedNode.id);
+        return;
+      }
+
+      // Enter -> Add Sibling Node
+      if (e.key === 'Enter' && selectedNode) {
+        e.preventDefault();
+        handleAddSiblingNode(selectedNode.id);
+        return;
+      }
+
+      // Backspace / Delete -> Delete Selected Node
+      if ((e.key === 'Backspace' || e.key === 'Delete') && selectedNode) {
+        e.preventDefault();
+        handleDeleteNode();
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedNode, handleUndo, handleRedo, handleAddChildNode, handleAddSiblingNode, handleDeleteNode]);
+
+  // Auto layout using D3 Hierarchy with smooth camera transition
   const applyD3Layout = (direction: LayoutDirection) => {
     if (nodes.length === 0) return;
+    if (!readOnly) recordHistory();
 
     const layoutNodes = nodes.map((n) => ({
       id: n.id,
@@ -379,54 +609,155 @@ export default function MindmapCanvas({
         return node;
       })
     );
+
+    // Smoothly animate camera to frame the newly formatted layout
+    setTimeout(() => {
+      rfInstance?.fitView({ duration: 400, padding: 0.2 });
+    }, 50);
+  };
+
+  // Toggle Public Access Handler
+  const handleTogglePublic = async () => {
+    if (readOnly) return;
+    setIsShareLoading(true);
+    const newPublicState = !isPublic;
+    try {
+      await toggleMindmapPublic(mapId, newPublicState);
+      setIsPublic(newPublicState);
+    } catch (err) {
+      console.error('Failed to toggle public state:', err);
+    } finally {
+      setIsShareLoading(false);
+    }
   };
 
   // File Download Helpers
   const handleExportJson = () => {
-    const jsonText = exportJson(nodes as ReactFlowNode[], edges as ReactFlowEdge[]);
+    const rfNodes: ReactFlowNode[] = nodes.map((n) => ({
+      id: n.id,
+      type: n.type || 'skill',
+      position: n.position,
+      data: {
+        label: (n.data?.label as string) || '',
+        description: (n.data?.description as string) || '',
+        color: (n.data?.color as string) || '#2563eb',
+        status: (n.data?.status as 'planned' | 'in_progress' | 'completed') || 'planned',
+      },
+    }));
+
+    const rfEdges: ReactFlowEdge[] = edges.map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      type: e.type || 'skill',
+      sourceHandle: e.sourceHandle || null,
+      targetHandle: e.targetHandle || null,
+    }));
+
+    const jsonText = exportJson(rfNodes, rfEdges);
     const blob = new Blob([jsonText], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${title}.json`;
+    a.download = `${title.toLowerCase().replace(/[^a-z0-9]/g, '-') || 'mindmap'}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   const handleExportOpml = () => {
-    const opmlText = generateOpml(nodes as ReactFlowNode[], edges as ReactFlowEdge[]);
+    const rfNodes: ReactFlowNode[] = nodes.map((n) => ({
+      id: n.id,
+      type: n.type || 'skill',
+      position: n.position,
+      data: {
+        label: (n.data?.label as string) || '',
+        description: (n.data?.description as string) || '',
+        color: (n.data?.color as string) || '#2563eb',
+        status: (n.data?.status as 'planned' | 'in_progress' | 'completed') || 'planned',
+      },
+    }));
+
+    const rfEdges: ReactFlowEdge[] = edges.map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+    }));
+
+    const opmlText = generateOpml(rfNodes, rfEdges);
     const blob = new Blob([opmlText], { type: 'text/xml' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${title}.opml`;
+    a.download = `${title.toLowerCase().replace(/[^a-z0-9]/g, '-') || 'mindmap'}.opml`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   const handleExportFreeMind = () => {
-    const mmText = generateFreeMind(nodes as ReactFlowNode[], edges as ReactFlowEdge[]);
-    const blob = new Blob([mmText], { type: 'text/xml' });
+    const rfNodes: ReactFlowNode[] = nodes.map((n) => ({
+      id: n.id,
+      type: n.type || 'skill',
+      position: n.position,
+      data: {
+        label: (n.data?.label as string) || '',
+        description: (n.data?.description as string) || '',
+        color: (n.data?.color as string) || '#2563eb',
+        status: (n.data?.status as 'planned' | 'in_progress' | 'completed') || 'planned',
+      },
+    }));
+
+    const rfEdges: ReactFlowEdge[] = edges.map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+    }));
+
+    const mmText = generateFreeMind(rfNodes, rfEdges);
+    const blob = new Blob([mmText], { type: 'application/x-freemind' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${title}.mm`;
+    a.download = `${title.toLowerCase().replace(/[^a-z0-9]/g, '-') || 'mindmap'}.mm`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  // Local Import Handlers
-  const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>, fileType: 'opml' | 'freemind') => {
-    if (!e.target.files || e.target.files.length === 0) return;
-    const file = e.target.files[0];
+  // Export high-res PNG image
+  const handleExportPng = async () => {
+    const element = document.querySelector('.react-flow__viewport') as HTMLElement;
+    if (!element) return;
+
+    try {
+      const dataUrl = await toPng(element, {
+        backgroundColor: '#f8fafc',
+        pixelRatio: 2, // 2x Retina resolution
+      });
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = `${title.toLowerCase().replace(/[^a-z0-9]/g, '-') || 'mindmap'}.png`;
+      a.click();
+    } catch (err) {
+      console.error('Failed to export PNG:', err);
+    }
+  };
+
+  // File Import Helpers
+  const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>, type: 'opml' | 'freemind') => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    recordHistory();
     const reader = new FileReader();
     reader.onload = (event) => {
+      const content = event.target?.result as string;
+      if (!content) return;
+
       try {
-        const text = event.target?.result as string;
-        const result = fileType === 'opml' ? parseOpml(text) : parseFreeMind(text);
-        
-        // Map back to React Flow format
-        const importedNodes = result.nodes.map((n) => {
+        const parsed = type === 'opml' ? parseOpml(content) : parseFreeMind(content);
+        const importedNodes = parsed.nodes;
+        const importedEdges = parsed.edges;
+
+        const nextNodes: Node[] = importedNodes.map((n) => {
           const meta = n.metadata as Record<string, unknown> | null;
           return {
             id: n.id,
@@ -441,55 +772,135 @@ export default function MindmapCanvas({
           };
         });
 
-        const importedEdges = result.edges.map((e) => ({
-          id: e.id,
-          source: e.sourceNodeId,
-          target: e.targetNodeId,
+        const nextEdges: Edge[] = importedEdges.map((ed) => ({
+          id: ed.id,
+          source: ed.sourceNodeId,
+          target: ed.targetNodeId,
           type: 'skill',
         }));
 
-        setNodes(importedNodes);
-        setEdges(importedEdges);
-      } catch {
-        alert('Failed to parse file. Make sure it is a valid format.');
+        setNodes(nextNodes);
+        setEdges(nextEdges);
+        setSelectedNode(null);
+        setTimeout(() => {
+          rfInstance?.fitView({ duration: 400, padding: 0.2 });
+        }, 50);
+      } catch (err) {
+        console.error('Failed to parse file:', err);
       }
     };
     reader.readAsText(file);
+    e.target.value = '';
   };
 
-  // AI Suggestion Handler
+  // AI Suggestion API Request
   const handleGetAISuggestions = async () => {
     if (!selectedNode) return;
     setAiLoading(true);
     setAiError(null);
-    setAiSuggestions([]);
 
     try {
-      const response = await fetch('/api/ai/suggest', {
+      const res = await fetch('/api/ai/suggest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          label: selectedNode.data.label,
+          currentSkill: selectedNode.data.label,
+          description: selectedNode.data.description,
           type: aiType,
         }),
       });
 
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to fetch suggestions');
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to fetch AI suggestions.');
       }
+
       setAiSuggestions(data.suggestions || []);
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : 'An error occurred fetching recommendations.';
-      setAiError(errMsg);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setAiError(errMsg || 'An error occurred while contacting AI.');
     } finally {
       setAiLoading(false);
     }
   };
 
-  // Submit handler for AI List Importer Modal
+  // 1-Click AI Auto-Expand Branch (Sub-skills or Prerequisites)
+  const handleAutoExpandBranch = async (type: 'child' | 'parent') => {
+    if (!selectedNode || readOnly || aiAutoExpanding) return;
+    setAiAutoExpanding(true);
+    setAiError(null);
+
+    try {
+      const res = await fetch('/api/ai/suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          currentSkill: selectedNode.data.label,
+          description: selectedNode.data.description,
+          type,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to fetch suggestions from AI service.');
+      }
+
+      const suggestions = (data.suggestions || []) as AISuggestion[];
+      if (suggestions.length === 0) return;
+
+      recordHistory();
+      const newNodesList: Node[] = [];
+      const newEdgesList: Edge[] = [];
+
+      suggestions.forEach((sug, idx) => {
+        const newId = `n-ai-${uuidv4().substring(0, 8)}`;
+        const yOffset = (idx - (suggestions.length - 1) / 2) * 120;
+        const xOffset = type === 'child' ? 320 : -320;
+
+        const newNode: Node = {
+          id: newId,
+          type: 'skill',
+          position: {
+            x: selectedNode.position.x + xOffset,
+            y: selectedNode.position.y + yOffset,
+          },
+          data: {
+            label: sug.label,
+            description: sug.description,
+            color: '#7c3aed',
+            status: 'planned' as const,
+          },
+        };
+
+        const newEdge: Edge = {
+          id: `e-${uuidv4().substring(0, 8)}`,
+          source: type === 'parent' ? newId : selectedNode.id,
+          target: type === 'parent' ? selectedNode.id : newId,
+          type: 'skill',
+        };
+
+        newNodesList.push(newNode);
+        newEdgesList.push(newEdge);
+      });
+
+      setNodes((nds) => nds.concat(newNodesList));
+      setEdges((eds) => eds.concat(newEdgesList));
+
+      setTimeout(() => {
+        rfInstance?.fitView({ duration: 400, padding: 0.2 });
+      }, 50);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setAiError(errMsg || 'An error occurred during auto-expansion.');
+    } finally {
+      setAiAutoExpanding(false);
+    }
+  };
+
+  // AI List-to-Map Importer Submit Handler
   const handleAiImportSubmit = async () => {
-    if (!aiImportText.trim()) return;
+    if (!aiImportText.trim() || aiImportPending) return;
 
     setAiImportPending(true);
     setAiImportError(null);
@@ -521,13 +932,12 @@ export default function MindmapCanvas({
       const rawNodes = data.nodes as AINode[];
       const rawEdges = data.edges as AIEdge[];
 
-      // Compute visual layout coordinates via D3 helper
-      const positionedNodes = computeD3Layout(rawNodes, rawEdges, 'TB');
+      const positionedNodes = computeD3Layout(rawNodes, rawEdges, 'RADIAL_MINDMAP');
+
+      recordHistory();
 
       if (aiImportMode === 'replace') {
-        // Option 1: Replace active canvas state
         setNodes(positionedNodes);
-        
         const nextEdges = rawEdges.map((e: AIEdge, index: number) => ({
           id: `e-${index}-${uuidv4().substring(0, 8)}`,
           source: e.source,
@@ -536,13 +946,9 @@ export default function MindmapCanvas({
         }));
         setEdges(nextEdges);
         setSelectedNode(null);
-
       } else {
-        // Option 2: Merge / Append to active canvas state
         const mergePrefix = `ai-${uuidv4().substring(0, 8)}-`;
-
-        // Offset layout coordinates to center the new sub-graph near selected node if possible
-        const offset = selectedNode 
+        const offset = selectedNode
           ? { x: selectedNode.position.x + 350, y: selectedNode.position.y }
           : { x: 100, y: 100 };
 
@@ -563,9 +969,7 @@ export default function MindmapCanvas({
           type: 'skill',
         }));
 
-        // Link new root node to selected node if a node is selected
         if (selectedNode) {
-          // Identify root nodes within the new sub-graph
           const targetIds = new Set(rawEdges.map((e: AIEdge) => e.target));
           const subGraphRoots = rawNodes.filter((n: AINode) => !targetIds.has(n.id));
 
@@ -586,6 +990,10 @@ export default function MindmapCanvas({
       setIsAiImportOpen(false);
       setAiImportText('');
       setAiImportError(null);
+
+      setTimeout(() => {
+        rfInstance?.fitView({ duration: 400, padding: 0.2 });
+      }, 50);
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
       setAiImportError(errMsg || 'An error occurred during AI import.');
@@ -596,15 +1004,16 @@ export default function MindmapCanvas({
 
   // Promote suggestion to node
   const handlePromoteSuggestion = (sug: AISuggestion) => {
-    if (!selectedNode) return;
+    if (!selectedNode || readOnly) return;
+    recordHistory();
 
     let offset = { x: 0, y: 0 };
     if (aiType === 'child') {
-      offset = { x: 260, y: (Math.random() - 0.5) * 150 };
+      offset = { x: 280, y: (Math.random() - 0.5) * 150 };
     } else if (aiType === 'parent') {
-      offset = { x: -260, y: (Math.random() - 0.5) * 150 };
+      offset = { x: -280, y: (Math.random() - 0.5) * 150 };
     } else {
-      offset = { x: (Math.random() - 0.5) * 150, y: 160 };
+      offset = { x: (Math.random() - 0.5) * 150, y: 140 };
     }
 
     const newId = `n-ai-${uuidv4()}`;
@@ -618,7 +1027,7 @@ export default function MindmapCanvas({
       data: {
         label: sug.label,
         description: sug.description,
-        color: '#7c3aed', // Purple color representing AI generated node
+        color: '#7c3aed',
         status: 'planned' as const,
       },
     };
@@ -633,9 +1042,10 @@ export default function MindmapCanvas({
     setNodes((nds) => nds.concat(newNode));
     setEdges((eds) => eds.concat(newEdge));
 
-    // Remove from suggestions array
     setAiSuggestions((prev) => prev.filter((s) => s.label !== sug.label));
   };
+
+  const shareUrl = typeof window !== 'undefined' ? `${window.location.origin}/share/${mapId}` : '';
 
   return (
     <div className="flex-1 flex overflow-hidden relative">
@@ -651,13 +1061,27 @@ export default function MindmapCanvas({
           onPaneClick={onPaneClick}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
+          onInit={setRfInstance}
           fitView
         >
           <Background variant={BackgroundVariant.Dots} gap={12} size={1} />
-          
+          <Controls className="bg-white border border-slate-200 shadow-md rounded-xl overflow-hidden" />
+
+          {showMiniMap && (
+            <MiniMap
+              className="bg-white border border-slate-200 shadow-xl rounded-xl overflow-hidden"
+              nodeColor={(n) => (n.data?.color as string) || '#2563eb'}
+              zoomable
+              pannable
+            />
+          )}
+
           {/* Header Panel */}
-          <Panel position="top-left" className="bg-white p-3 rounded-xl shadow-md border border-slate-200 flex items-center gap-3">
-            {isEditingTitle ? (
+          <Panel
+            position="top-left"
+            className="bg-white p-3 rounded-xl shadow-md border border-slate-200 flex items-center gap-3"
+          >
+            {isEditingTitle && !readOnly ? (
               <input
                 type="text"
                 value={title}
@@ -668,79 +1092,150 @@ export default function MindmapCanvas({
                 autoFocus
               />
             ) : (
-              <h2 
-                className="text-base font-bold text-slate-800 cursor-pointer hover:text-blue-600 flex items-center gap-1"
-                onClick={() => setIsEditingTitle(true)}
+              <h2
+                className={`text-base font-bold text-slate-800 flex items-center gap-1 ${
+                  readOnly ? '' : 'cursor-pointer hover:text-blue-600'
+                }`}
+                onClick={() => !readOnly && setIsEditingTitle(true)}
               >
-                🧠 {title} <span className="text-xs font-normal text-slate-400">✏️</span>
+                🧠 {title} {!readOnly && <span className="text-xs font-normal text-slate-400">✏️</span>}
               </h2>
             )}
 
             <div className="h-4 w-px bg-slate-200"></div>
 
-            <span className="text-xs font-semibold px-2 py-1 rounded bg-slate-100 flex items-center gap-1">
-              {saveStatus === 'saved' && <span className="text-emerald-500">● Saved</span>}
-              {saveStatus === 'saving' && <span className="text-amber-500 animate-pulse">● Saving...</span>}
-              {saveStatus === 'error' && <span className="text-red-500">● Sync Error</span>}
-            </span>
+            {/* Progress Summary Tracker */}
+            <div className="flex items-center gap-2 bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-100">
+              <span className="text-xs font-bold text-slate-700">
+                🎯 {stats.percent}%
+              </span>
+              <span className="text-[11px] text-slate-400 font-medium hidden sm:inline">
+                ({stats.completed}/{stats.total} done)
+              </span>
+              <div className="w-16 bg-slate-200 h-2 rounded-full overflow-hidden flex">
+                <div
+                  className="bg-emerald-500 h-full transition-all duration-300"
+                  style={{ width: `${stats.percent}%` }}
+                />
+              </div>
+            </div>
+
+            {!readOnly && (
+              <>
+                <div className="h-4 w-px bg-slate-200"></div>
+                <span className="text-xs font-semibold px-2 py-1 rounded bg-slate-100 flex items-center gap-1">
+                  {saveStatus === 'saved' && <span className="text-emerald-500">● Saved</span>}
+                  {saveStatus === 'saving' && <span className="text-amber-500 animate-pulse">● Saving...</span>}
+                  {saveStatus === 'error' && <span className="text-red-500">● Sync Error</span>}
+                </span>
+
+                <button
+                  onClick={() => setIsShareModalOpen(true)}
+                  className={`text-xs font-semibold px-2.5 py-1 rounded-lg transition flex items-center gap-1 border ${
+                    isPublic
+                      ? 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+                      : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                  }`}
+                  title="Share read-only roadmap link"
+                >
+                  🔗 {isPublic ? 'Shared (Public)' : 'Share'}
+                </button>
+              </>
+            )}
           </Panel>
 
           {/* Action Toolbar */}
-          <Panel position="top-right" className="bg-white p-3 rounded-xl shadow-md border border-slate-200 flex flex-wrap gap-2 max-w-lg">
-            <button 
-              onClick={handleAddNode}
-              className="bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs px-3 py-1.5 rounded-lg transition"
-            >
-              + Add Node
-            </button>
-            <button 
+          <Panel
+            position="top-right"
+            className="bg-white p-2.5 rounded-xl shadow-md border border-slate-200 flex flex-wrap items-center gap-1.5 max-w-2xl"
+          >
+            {!readOnly && (
+              <>
+                <button
+                  onClick={handleAddNode}
+                  className="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs px-3 py-1.5 rounded-lg transition shadow-sm"
+                  title="Add new concept card (or press Tab on selected node)"
+                >
+                  + Add Node
+                </button>
+
+                <div className="flex gap-0.5 bg-slate-100 p-0.5 rounded-lg">
+                  <button
+                    onClick={handleUndo}
+                    disabled={history.length === 0}
+                    className="hover:bg-white disabled:opacity-30 text-slate-700 text-xs px-2 py-1 rounded transition"
+                    title="Undo (Cmd+Z)"
+                  >
+                    ↩️
+                  </button>
+                  <button
+                    onClick={handleRedo}
+                    disabled={future.length === 0}
+                    className="hover:bg-white disabled:opacity-30 text-slate-700 text-xs px-2 py-1 rounded transition"
+                    title="Redo (Cmd+Shift+Z)"
+                  >
+                    ↪️
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Layout Triggers */}
+            <button
               onClick={() => applyD3Layout('RADIAL_MINDMAP')}
-              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
+              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium text-xs px-2.5 py-1.5 rounded-lg transition"
               title="Classic balanced Mind Map radiating symmetrically from center"
             >
               🧠 Mind Map
             </button>
-            <button 
+            <button
               onClick={() => applyD3Layout('RADIAL_360')}
-              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
+              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium text-xs px-2.5 py-1.5 rounded-lg transition"
               title="Full 360-degree circular starburst with automatic collision-free radius scaling"
             >
               🌐 Radial 360°
             </button>
-            <button 
+            <button
               onClick={() => applyD3Layout('TB')}
-              className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
+              className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-2 py-1.5 rounded-lg transition"
               title="Hierarchical tree from Top to Bottom"
             >
               ⬇️ Vertical
             </button>
-            <button 
+            <button
               onClick={() => applyD3Layout('LR')}
-              className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-3 py-1.5 rounded-lg transition"
+              className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-2 py-1.5 rounded-lg transition"
               title="Logic chart from Left to Right"
             >
               ➡️ Horizontal
             </button>
 
-            <div className="w-px h-6 bg-slate-200 mx-1"></div>
+            <div className="w-px h-5 bg-slate-200 mx-0.5"></div>
 
             {/* Export Actions */}
             <div className="flex gap-1">
-              <button 
+              <button
+                onClick={handleExportPng}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs px-2 py-1.5 rounded-lg transition shadow-sm"
+                title="Download high-resolution PNG image"
+              >
+                📸 PNG
+              </button>
+              <button
                 onClick={handleExportJson}
                 className="bg-slate-800 hover:bg-slate-950 text-white text-xs px-2 py-1.5 rounded-lg transition"
                 title="Export JSON file"
               >
                 JSON
               </button>
-              <button 
+              <button
                 onClick={handleExportOpml}
                 className="bg-slate-800 hover:bg-slate-950 text-white text-xs px-2 py-1.5 rounded-lg transition"
                 title="Export OPML file"
               >
                 OPML
               </button>
-              <button 
+              <button
                 onClick={handleExportFreeMind}
                 className="bg-slate-800 hover:bg-slate-950 text-white text-xs px-2 py-1.5 rounded-lg transition"
                 title="Export FreeMind (.mm) file"
@@ -749,42 +1244,57 @@ export default function MindmapCanvas({
               </button>
             </div>
 
-            {/* Import Actions */}
+            {!readOnly && (
+              <>
+                <div className="w-px h-5 bg-slate-200 mx-0.5"></div>
+                {/* Import Actions */}
+                <button
+                  onClick={() => setIsAiImportOpen(true)}
+                  className="bg-purple-50 hover:bg-purple-100 text-purple-700 font-semibold text-xs px-2.5 py-1.5 rounded-lg transition"
+                  title="Build map automatically from text list using AI"
+                >
+                  ✨ AI Import
+                </button>
+                <label className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-2 py-1.5 rounded-lg cursor-pointer transition">
+                  OPML
+                  <input
+                    type="file"
+                    accept=".opml,.xml"
+                    onChange={(e) => handleImportFile(e, 'opml')}
+                    className="hidden"
+                  />
+                </label>
+                <label className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-2 py-1.5 rounded-lg cursor-pointer transition">
+                  FreeMind
+                  <input
+                    type="file"
+                    accept=".mm,.xml"
+                    onChange={(e) => handleImportFile(e, 'freemind')}
+                    className="hidden"
+                  />
+                </label>
+              </>
+            )}
+
             <button
-              onClick={() => setIsAiImportOpen(true)}
-              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold text-xs px-2.5 py-1.5 rounded-lg transition"
-              title="Build map automatically from text list using AI"
+              onClick={() => setShowMiniMap((prev) => !prev)}
+              className={`text-xs px-2 py-1.5 rounded-lg transition ${
+                showMiniMap ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+              }`}
+              title="Toggle MiniMap"
             >
-              ✨ AI List Import
+              🗺️
             </button>
-            <label className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-2 py-1.5 rounded-lg cursor-pointer transition">
-              Import OPML
-              <input 
-                type="file" 
-                accept=".opml,.xml"
-                onChange={(e) => handleImportFile(e, 'opml')} 
-                className="hidden" 
-              />
-            </label>
-            <label className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-2 py-1.5 rounded-lg cursor-pointer transition">
-              Import FreeMind
-              <input 
-                type="file" 
-                accept=".mm,.xml"
-                onChange={(e) => handleImportFile(e, 'freemind')} 
-                className="hidden" 
-              />
-            </label>
           </Panel>
         </ReactFlow>
       </div>
 
       {/* Selected Node Sidebar Form */}
-      {selectedNode && (
+      {selectedNode && !readOnly && (
         <div className="w-80 border-l border-slate-200 bg-white h-full flex flex-col p-6 shadow-xl z-20 overflow-y-auto">
           <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-6">
             <h3 className="font-bold text-slate-900 text-lg">Edit Node</h3>
-            <button 
+            <button
               onClick={() => setSelectedNode(null)}
               className="text-slate-400 hover:text-slate-600 text-sm font-medium"
             >
@@ -858,19 +1368,51 @@ export default function MindmapCanvas({
               >
                 Apply Changes
               </button>
-              <button
-                onClick={handleDeleteNode}
-                className="w-full border border-red-200 text-red-600 hover:bg-red-50 font-medium text-sm py-2 rounded-lg transition"
-              >
-                Delete Node
-              </button>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => handleAddChildNode(selectedNode.id)}
+                  className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs py-2 rounded-lg transition"
+                  title="Shortcut: Tab"
+                >
+                  + Sub-node (Tab)
+                </button>
+                <button
+                  onClick={handleDeleteNode}
+                  className="border border-red-200 text-red-600 hover:bg-red-50 font-medium text-xs py-2 rounded-lg transition"
+                  title="Shortcut: Delete"
+                >
+                  Delete (Del)
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* AI SUGGESTIONS SECTION */}
-          <div className="mt-8 border-t border-slate-100 pt-6">
-            <h4 className="font-bold text-slate-900 text-sm mb-3">🔮 AI Skill Copilot</h4>
-            
+          {/* 1-CLICK AI EXPANDER & SUGGESTIONS */}
+          <div className="mt-6 border-t border-slate-100 pt-6">
+            <h4 className="font-bold text-slate-900 text-sm mb-2 flex items-center gap-1.5">
+              <span>🔮</span> AI Branch Expander
+            </h4>
+            <p className="text-xs text-slate-500 mb-3">
+              Generate and link sub-skills or prerequisites automatically with Gemini.
+            </p>
+
+            <div className="grid grid-cols-2 gap-2 mb-4">
+              <button
+                onClick={() => handleAutoExpandBranch('child')}
+                disabled={aiAutoExpanding}
+                className="bg-purple-600 hover:bg-purple-700 disabled:bg-purple-400 text-white font-semibold text-xs py-2 px-3 rounded-lg transition shadow-sm"
+              >
+                {aiAutoExpanding ? 'Generating...' : '✨ Auto Sub-Skills'}
+              </button>
+              <button
+                onClick={() => handleAutoExpandBranch('parent')}
+                disabled={aiAutoExpanding}
+                className="bg-purple-100 hover:bg-purple-200 text-purple-700 disabled:opacity-50 font-semibold text-xs py-2 px-3 rounded-lg transition border border-purple-200"
+              >
+                {aiAutoExpanding ? 'Generating...' : '✨ Auto Prereqs'}
+              </button>
+            </div>
+
             <div className="flex gap-1 mb-3">
               {(['child', 'sibling', 'parent'] as const).map((t) => (
                 <button
@@ -890,9 +1432,9 @@ export default function MindmapCanvas({
             <button
               onClick={handleGetAISuggestions}
               disabled={aiLoading}
-              className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-purple-400 text-white font-medium text-sm py-2 rounded-lg transition shadow-sm hover:shadow"
+              className="w-full bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-800 font-medium text-xs py-2 rounded-lg transition border border-slate-200"
             >
-              {aiLoading ? 'Thinking...' : 'Get AI Suggestions'}
+              {aiLoading ? 'Thinking...' : 'Browse Suggestions'}
             </button>
 
             {aiError && (
@@ -907,8 +1449,8 @@ export default function MindmapCanvas({
                   Suggestions (click + to add to map)
                 </p>
                 {aiSuggestions.map((sug) => (
-                  <div 
-                    key={sug.label} 
+                  <div
+                    key={sug.label}
                     className="p-3 border border-purple-100 rounded-xl bg-purple-50/50 hover:bg-purple-50 transition flex items-start justify-between gap-2 group"
                   >
                     <div className="overflow-hidden">
@@ -932,15 +1474,92 @@ export default function MindmapCanvas({
         </div>
       )}
 
+      {/* SHARE MODAL */}
+      {isShareModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-100">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-4">
+              <h3 className="font-bold text-slate-900 text-lg flex items-center gap-2">
+                <span>🔗</span> Share Mind Map
+              </h3>
+              <button
+                onClick={() => {
+                  setIsShareModalOpen(false);
+                  setShareCopied(false);
+                }}
+                className="text-slate-400 hover:text-slate-600 text-sm font-medium"
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200">
+                <div>
+                  <p className="font-bold text-sm text-slate-800">Public Access</p>
+                  <p className="text-xs text-slate-500">
+                    Anyone with the link can view this roadmap without signing in.
+                  </p>
+                </div>
+                <button
+                  onClick={handleTogglePublic}
+                  disabled={isShareLoading}
+                  className={`w-12 h-6 flex items-center rounded-full p-1 transition duration-300 cursor-pointer ${
+                    isPublic ? 'bg-blue-600 justify-end' : 'bg-slate-300 justify-start'
+                  }`}
+                >
+                  <div className="bg-white w-4 h-4 rounded-full shadow-md"></div>
+                </button>
+              </div>
+
+              {isPublic ? (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                    Shareable URL
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={shareUrl}
+                      className="flex-1 text-xs border border-slate-300 rounded-lg px-3 py-2 bg-slate-50 text-slate-700 font-mono select-all"
+                    />
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(shareUrl);
+                        setShareCopied(true);
+                        setTimeout(() => setShareCopied(false), 2000);
+                      }}
+                      className="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs px-4 py-2 rounded-lg transition whitespace-nowrap"
+                    >
+                      {shareCopied ? '✓ Copied!' : 'Copy Link'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-amber-600 bg-amber-50 p-3 rounded-lg border border-amber-200">
+                  ⚠️ This map is currently private. Enable Public Access above to share this link.
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AI LIST IMPORT MODAL */}
       {isAiImportOpen && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-100 animate-in fade-in zoom-in duration-150">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-100">
             <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-4">
               <h3 className="font-bold text-slate-900 text-lg flex items-center gap-1.5">
                 <span>✨</span> AI List-to-Map Importer
               </h3>
-              <button 
-                onClick={() => { setIsAiImportOpen(false); setAiImportText(''); setAiImportError(null); }}
+              <button
+                onClick={() => {
+                  setIsAiImportOpen(false);
+                  setAiImportText('');
+                  setAiImportError(null);
+                }}
                 className="text-slate-400 hover:text-slate-600 text-sm font-medium"
               >
                 ✕ Close
@@ -948,61 +1567,67 @@ export default function MindmapCanvas({
             </div>
 
             <p className="text-xs text-slate-500 mb-4 leading-relaxed">
-              Paste a raw list of skills, topics, or components. Our AI copilot will analyze their dependencies, derive prerequisites, and arrange them cleanly on your canvas.
+              Paste a raw list of skills, syllabus bullets, or career milestones. Gemini will
+              automatically extract hierarchy, categories, and prerequisites to build your map!
             </p>
 
+            <textarea
+              rows={6}
+              value={aiImportText}
+              onChange={(e) => setAiImportText(e.target.value)}
+              placeholder="e.g.&#10;Frontend Engineering:&#10;- HTML/CSS: Flexbox, Grid&#10;- JavaScript: Async/Await, Promises&#10;- React: Hooks, Server Components, Next.js"
+              className="w-full text-sm border border-slate-300 rounded-xl p-3 text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+            />
+
+            <div className="mt-4 flex items-center gap-4">
+              <label className="text-xs font-semibold text-slate-600 flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="radio"
+                  name="importMode"
+                  value="merge"
+                  checked={aiImportMode === 'merge'}
+                  onChange={() => setAiImportMode('merge')}
+                  className="text-blue-600"
+                />
+                Merge into Current Map
+              </label>
+              <label className="text-xs font-semibold text-slate-600 flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="radio"
+                  name="importMode"
+                  value="replace"
+                  checked={aiImportMode === 'replace'}
+                  onChange={() => setAiImportMode('replace')}
+                  className="text-blue-600"
+                />
+                Replace Entire Map
+              </label>
+            </div>
+
             {aiImportError && (
-              <div className="bg-red-50 text-red-600 text-xs p-2.5 rounded-lg border border-red-100 mb-4">
-                ⚠️ {aiImportError}
-              </div>
+              <p className="mt-3 text-xs text-red-600 bg-red-50 p-2.5 rounded-lg border border-red-100">
+                {aiImportError}
+              </p>
             )}
 
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
-                  Skills / Topics List
-                </label>
-                <textarea
-                  value={aiImportText}
-                  onChange={(e) => setAiImportText(e.target.value)}
-                  placeholder="E.g., HTML, CSS, JavaScript, React, Tailwind CSS, TypeScript, Next.js"
-                  rows={4}
-                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  disabled={aiImportPending}
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
-                  Import Action
-                </label>
-                <select
-                  value={aiImportMode}
-                  onChange={(e) => setAiImportMode(e.target.value as 'merge' | 'replace')}
-                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  disabled={aiImportPending}
-                >
-                  <option value="merge">Merge (Append & connect new nodes to this map)</option>
-                  <option value="replace">Replace (Clear current canvas & start fresh)</option>
-                </select>
-              </div>
-
-              <div className="pt-2 flex gap-2">
-                <button
-                  onClick={handleAiImportSubmit}
-                  disabled={aiImportPending || !aiImportText.trim()}
-                  className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm py-2.5 rounded-lg transition disabled:bg-indigo-300"
-                >
-                  {aiImportPending ? 'AI is mapping concepts...' : 'Generate and Import'}
-                </button>
-                <button
-                  onClick={() => { setIsAiImportOpen(false); setAiImportText(''); setAiImportError(null); }}
-                  className="border border-slate-200 hover:bg-slate-50 text-slate-600 font-semibold text-sm py-2.5 px-4 rounded-lg transition"
-                  disabled={aiImportPending}
-                >
-                  Cancel
-                </button>
-              </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  setIsAiImportOpen(false);
+                  setAiImportText('');
+                  setAiImportError(null);
+                }}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleAiImportSubmit}
+                disabled={aiImportPending || !aiImportText.trim()}
+                className="px-5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 rounded-lg transition shadow-sm"
+              >
+                {aiImportPending ? 'Building Map...' : 'Generate Map'}
+              </button>
             </div>
           </div>
         </div>

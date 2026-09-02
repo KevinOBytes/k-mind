@@ -1,4 +1,4 @@
-import React, { memo } from 'react';
+import React, { memo, useState, useEffect } from 'react';
 import { Handle, Position, NodeProps, Node } from '@xyflow/react';
 
 export type SkillNodeData = Node<{
@@ -9,11 +9,26 @@ export type SkillNodeData = Node<{
   collapsed?: boolean;
   hasChildren?: boolean;
   onToggleCollapse?: (id: string) => void;
+  onUpdateLabel?: (id: string, newLabel: string) => void;
+  readOnly?: boolean;
 }, 'skill'>;
 
 export const SkillNode = memo(({ id, data, selected }: NodeProps<SkillNodeData>) => {
   const color = data.color || '#2563eb';
   const status = data.status || 'planned';
+  const [isEditing, setIsEditing] = useState(false);
+  const [localLabel, setLocalLabel] = useState(data.label);
+
+  useEffect(() => {
+    setLocalLabel(data.label);
+  }, [data.label]);
+
+  const handleFinishEdit = () => {
+    setIsEditing(false);
+    if (localLabel.trim() && localLabel.trim() !== data.label) {
+      data.onUpdateLabel?.(id, localLabel.trim());
+    }
+  };
 
   const statusEmojis = {
     planned: '⏳',
@@ -29,7 +44,7 @@ export const SkillNode = memo(({ id, data, selected }: NodeProps<SkillNodeData>)
 
   return (
     <div 
-      className={`px-4 py-3 rounded-xl border-2 bg-white text-slate-800 transition shadow-md w-60 ${
+      className={`px-4 py-3 rounded-xl border-2 bg-white text-slate-800 transition shadow-md w-60 relative ${
         selected ? 'ring-4 ring-blue-400 ring-opacity-50 border-blue-500 scale-105' : 'border-slate-200'
       }`}
       style={{ borderLeftColor: color, borderLeftWidth: '6px' }}
@@ -73,9 +88,39 @@ export const SkillNode = memo(({ id, data, selected }: NodeProps<SkillNodeData>)
           </span>
         </div>
         
-        <h4 className="font-bold text-sm truncate text-slate-900 mt-1" title={data.label}>
-          {data.label}
-        </h4>
+        {isEditing && !data.readOnly ? (
+          <input
+            type="text"
+            value={localLabel}
+            onChange={(e) => setLocalLabel(e.target.value)}
+            onBlur={handleFinishEdit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleFinishEdit();
+              if (e.key === 'Escape') {
+                setLocalLabel(data.label);
+                setIsEditing(false);
+              }
+            }}
+            autoFocus
+            className="font-bold text-sm text-slate-900 border border-blue-400 rounded px-1.5 py-0.5 mt-1 outline-none w-full bg-blue-50/50"
+            onClick={(e) => e.stopPropagation()}
+          />
+        ) : (
+          <h4 
+            className={`font-bold text-sm truncate text-slate-900 mt-1 ${
+              data.readOnly ? '' : 'cursor-text select-none hover:text-blue-600'
+            }`}
+            title={data.label}
+            onDoubleClick={(e) => {
+              if (!data.readOnly) {
+                e.stopPropagation();
+                setIsEditing(true);
+              }
+            }}
+          >
+            {data.label}
+          </h4>
+        )}
         
         {data.description && (
           <p className="text-xs text-slate-500 line-clamp-2 mt-1">

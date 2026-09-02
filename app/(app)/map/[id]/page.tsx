@@ -24,6 +24,7 @@ export default async function MapPage({ params }: MapPageProps) {
     <MindmapCanvas
       mapId={id}
       initialTitle={map.title}
+      initialIsPublic={map.isPublic}
       initialNodes={nodes}
       initialEdges={edges}
     />
