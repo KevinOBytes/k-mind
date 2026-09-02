@@ -15,6 +15,13 @@
       "when": 1787268299678,
       "tag": "0001_light_black_cat",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788318886700,
+      "tag": "0002_gigantic_firelord",
+      "breakpoints": true
     }
   ]
 }

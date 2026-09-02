@@ -175,3 +175,45 @@ export async function createMindmapFromGraph(
   revalidatePath('/dashboard');
   return mapId;
 }
+
+export async function toggleMindmapPublic(id: string, isPublic: boolean) {
+  const user = await getSessionUserOrRedirect();
+  const userId = user.id as string;
+
+  await db
+    .update(mindmaps)
+    .set({ isPublic, updatedAt: new Date() })
+    .where(and(eq(mindmaps.id, id), eq(mindmaps.userId, userId)));
+
+  revalidatePath(`/map/${id}`);
+  revalidatePath(`/share/${id}`);
+  return { success: true, isPublic };
+}
+
+export async function getPublicMindmap(id: string) {
+  const [map] = await db
+    .select()
+    .from(mindmaps)
+    .where(eq(mindmaps.id, id))
+    .limit(1);
+
+  if (!map || !map.isPublic) {
+    return null;
+  }
+
+  const mapNodes = await db
+    .select()
+    .from(nodes)
+    .where(eq(nodes.mindmapId, id));
+
+  const mapEdges = await db
+    .select()
+    .from(edges)
+    .where(eq(edges.mindmapId, id));
+
+  return {
+    map,
+    nodes: mapNodes,
+    edges: mapEdges,
+  };
+}

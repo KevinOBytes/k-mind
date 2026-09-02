@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, doublePrecision, timestamp, varchar, jsonb } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, text, doublePrecision, timestamp, varchar, jsonb, boolean } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -27,6 +27,7 @@ export const mindmaps = pgTable('mindmaps', {
   userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
   title: varchar('title', { length: 255 }).notNull(),
   description: text('description'),
+  isPublic: boolean('is_public').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
