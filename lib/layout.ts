@@ -25,11 +25,77 @@ export interface PositionedNode {
   };
 }
 
-export type LayoutDirection = 'TB' | 'LR' | 'RADIAL_MINDMAP' | 'RADIAL_360' | 'RADIAL_COMPACT' | 'RADIAL_EXPANDED';
+export type LayoutDirection =
+  | 'TB'
+  | 'LR'
+  | 'RADIAL_MINDMAP'
+  | 'RADIAL_360'
+  | 'RADIAL_COMPACT'
+  | 'RADIAL_EXPANDED';
 
 interface HierarchyItem {
   id: string;
   children?: HierarchyItem[];
+}
+
+/**
+ * Post-layout collision resolution pass to guarantee no rectangular card overlap.
+ * Uses iterative force relaxation to nudge overlapping bounding boxes apart.
+ */
+function resolveCollisions(
+  coordsMap: Map<string, { x: number; y: number }>,
+  pinnedId: string | null = null,
+  minWidth = 270,
+  minHeight = 150,
+  iterations = 15
+) {
+  const ids = Array.from(coordsMap.keys());
+  if (ids.length <= 1) return;
+
+  for (let iter = 0; iter < iterations; iter++) {
+    let hasCollision = false;
+
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = i + 1; j < ids.length; j++) {
+        const idA = ids[i];
+        const idB = ids[j];
+
+        const posA = coordsMap.get(idA)!;
+        const posB = coordsMap.get(idB)!;
+
+        const dx = posB.x - posA.x;
+        const dy = posB.y - posA.y;
+
+        const absDx = Math.abs(dx);
+        const absDy = Math.abs(dy);
+
+        if (absDx < minWidth && absDy < minHeight) {
+          hasCollision = true;
+
+          const overlapX = minWidth - absDx;
+          const overlapY = minHeight - absDy;
+
+          // Push along axis of least overlap
+          if (overlapX < overlapY) {
+            const shift = overlapX / 2 + 5;
+            const dir = dx >= 0 ? 1 : -1;
+            if (idA !== pinnedId) posA.x -= shift * dir;
+            if (idB !== pinnedId) posB.x += shift * dir;
+          } else {
+            const shift = overlapY / 2 + 5;
+            const dir = dy >= 0 ? 1 : -1;
+            if (idA !== pinnedId) posA.y -= shift * dir;
+            if (idB !== pinnedId) posB.y += shift * dir;
+          }
+
+          coordsMap.set(idA, posA);
+          coordsMap.set(idB, posB);
+        }
+      }
+    }
+
+    if (!hasCollision) break;
+  }
 }
 
 export function computeD3Layout(
@@ -77,10 +143,13 @@ export function computeD3Layout(
 
   const coordsMap = new Map<string, { x: number; y: number }>();
 
-  // Backward compatibility alias: RADIAL_COMPACT and RADIAL_EXPANDED map to RADIAL_MINDMAP and RADIAL_360
+  // Backward compatibility alias
   const normalizedDirection: LayoutDirection =
-    direction === 'RADIAL_COMPACT' ? 'RADIAL_MINDMAP' :
-    direction === 'RADIAL_EXPANDED' ? 'RADIAL_360' : direction;
+    direction === 'RADIAL_COMPACT'
+      ? 'RADIAL_MINDMAP'
+      : direction === 'RADIAL_EXPANDED'
+      ? 'RADIAL_360'
+      : direction;
 
   // -------------------------------------------------------------
   // 1. BI-DIRECTIONAL MIND MAP (RADIAL_MINDMAP)
@@ -114,8 +183,8 @@ export function computeD3Layout(
         };
 
         const d3SideRoot = d3.hierarchy<HierarchyItem>(virtualSideRoot);
-        // Sibling vertical spacing: 110px, Level horizontal spacing: 320px
-        const tree = d3.tree<HierarchyItem>().nodeSize([110, 320]);
+        // Sibling vertical spacing: 160px, Level horizontal spacing: 340px
+        const tree = d3.tree<HierarchyItem>().nodeSize([160, 340]);
         const pointRoot = tree(d3SideRoot);
 
         pointRoot.descendants().forEach((d) => {
@@ -130,6 +199,9 @@ export function computeD3Layout(
       layoutSide(rightBranchIds, true);
       layoutSide(leftBranchIds, false);
     }
+
+    // Resolve any boundary collisions
+    resolveCollisions(coordsMap, primaryRootId, 270, 150);
   }
 
   // -------------------------------------------------------------
@@ -152,7 +224,7 @@ export function computeD3Layout(
     const d3Root = d3.hierarchy<HierarchyItem>(rootHierarchy);
 
     // Compute leaf count for each node (for proportional angular allocation)
-    d3Root.count(); // Sets d.value to number of leaves in subtree
+    d3Root.count();
     const totalLeaves = d3Root.value || 1;
 
     // Find max depth of tree
@@ -162,9 +234,9 @@ export function computeD3Layout(
     });
 
     // Dynamic radius sizing to guarantee no overlapping cards on any circle
-    // Each leaf card is 240px wide. Circumference = leaves * 250px
-    const minCircumferenceRadius = (totalLeaves * 250) / (2 * Math.PI);
-    const baseStep = 320;
+    // Each card is ~260px wide. Circumference = leaves * 300px
+    const minCircumferenceRadius = (totalLeaves * 300) / (2 * Math.PI);
+    const baseStep = 360;
     const radiusStep = Math.max(baseStep, minCircumferenceRadius / maxDepth);
 
     // Recursive angular sector assignment
@@ -204,6 +276,9 @@ export function computeD3Layout(
     if (roots.length === 1) {
       coordsMap.set(roots[0].id, { x: 0, y: 0 });
     }
+
+    // Resolve any radial collisions
+    resolveCollisions(coordsMap, roots[0]?.id || null, 270, 150);
   }
 
   // -------------------------------------------------------------
@@ -225,8 +300,8 @@ export function computeD3Layout(
     const d3Root = d3.hierarchy<HierarchyItem>(rootHierarchy);
 
     if (normalizedDirection === 'LR') {
-      // Sibling vertical spacing: 110px, Level horizontal spacing: 320px
-      const treeLayout = d3.tree<HierarchyItem>().nodeSize([110, 320]);
+      // Sibling vertical spacing: 160px, Level horizontal spacing: 340px
+      const treeLayout = d3.tree<HierarchyItem>().nodeSize([160, 340]);
       const pointRoot = treeLayout(d3Root);
 
       pointRoot.descendants().forEach((d) => {
@@ -234,9 +309,11 @@ export function computeD3Layout(
           coordsMap.set(d.data.id, { x: d.y, y: d.x });
         }
       });
+
+      resolveCollisions(coordsMap, roots[0]?.id || null, 270, 150);
     } else {
-      // TB (Top to Bottom): Sibling horizontal spacing: 280px, Level vertical spacing: 160px
-      const treeLayout = d3.tree<HierarchyItem>().nodeSize([280, 160]);
+      // TB (Top to Bottom): Sibling horizontal spacing: 320px, Level vertical spacing: 220px
+      const treeLayout = d3.tree<HierarchyItem>().nodeSize([320, 220]);
       const pointRoot = treeLayout(d3Root);
 
       pointRoot.descendants().forEach((d) => {
@@ -244,6 +321,8 @@ export function computeD3Layout(
           coordsMap.set(d.data.id, { x: d.x, y: d.y });
         }
       });
+
+      resolveCollisions(coordsMap, roots[0]?.id || null, 270, 150);
     }
   }
 

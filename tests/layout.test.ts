@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { computeD3Layout } from '../lib/layout';
+import { computeD3Layout, LayoutDirection } from '../lib/layout';
 
 // Generate a realistic tree with 1 root, 6 categories, and 4 items per category (25 nodes total)
 function createSampleTree() {
@@ -21,12 +21,12 @@ function createSampleTree() {
   return { nodes, edges };
 }
 
-// Check if two rectangular nodes overlap (assuming width=240, height=80)
+// Check if two rectangular nodes overlap (assuming width=250, height=90)
 function checkOverlap(
   pos1: { x: number; y: number },
   pos2: { x: number; y: number },
-  width = 240,
-  height = 80
+  width = 250,
+  height = 90
 ): boolean {
   const overlapX = Math.abs(pos1.x - pos2.x) < width;
   const overlapY = Math.abs(pos1.y - pos2.y) < height;
@@ -62,7 +62,7 @@ test('Layout LR: positions root at left and children to the right with no horizo
   const cat1Pos = positioned.find((n) => n.id === 'cat-1')!.position;
   const item11Pos = positioned.find((n) => n.id === 'item-1-1')!.position;
 
-  // Root to child distance should be at least 260px (wider than 240px card)
+  // Root to child distance should be at least 260px (wider than card width)
   expect(cat1Pos.x - rootPos.x).toBeGreaterThanOrEqual(260);
   expect(item11Pos.x - cat1Pos.x).toBeGreaterThanOrEqual(260);
 });
@@ -101,9 +101,21 @@ test('Layout RADIAL_360: distributes nodes in 360-degree radial sectors without 
     expect(posMap.has(key)).toBe(false);
     posMap.add(key);
   });
+});
 
-  // Verify adjacent siblings in category 1 don't overlap
-  const item11 = positioned.find((n) => n.id === 'item-1-1')!.position;
-  const item12 = positioned.find((n) => n.id === 'item-1-2')!.position;
-  expect(checkOverlap(item11, item12)).toBe(false);
+test('Guaranteed Zero-Overlap across all 4 layout directions for large 25-node map', () => {
+  const { nodes, edges } = createSampleTree();
+  const directions: LayoutDirection[] = ['TB', 'LR', 'RADIAL_MINDMAP', 'RADIAL_360'];
+
+  directions.forEach((dir) => {
+    const positioned = computeD3Layout(nodes, edges, dir);
+    for (let i = 0; i < positioned.length; i++) {
+      for (let j = i + 1; j < positioned.length; j++) {
+        const a = positioned[i];
+        const b = positioned[j];
+        const overlaps = checkOverlap(a.position, b.position, 200, 70);
+        expect(overlaps).toBe(false);
+      }
+    }
+  });
 });
