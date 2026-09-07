@@ -21,7 +21,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { toPng } from 'html-to-image';
-import { SkillNode } from './SkillNode';
+import { SkillNode, ResourceLink, TaskItem } from './SkillNode';
 import { SkillEdge } from './SkillEdge';
 import { saveMapData } from '@/app/actions/nodes-edges';
 import { renameMindmap, toggleMindmapPublic } from '@/app/actions/mindmaps';
@@ -29,6 +29,7 @@ import { computeD3Layout, LayoutDirection } from '@/lib/layout';
 import { exportJson, ReactFlowNode, ReactFlowEdge } from '@/lib/adapters/json';
 import { generateOpml, parseOpml } from '@/lib/adapters/opml';
 import { generateFreeMind, parseFreeMind } from '@/lib/adapters/freemind';
+import { generateMarkdownOutline, parseMarkdownOutline } from '@/lib/adapters/markdown';
 import { v4 as uuidv4 } from 'uuid';
 
 const nodeTypes = {
@@ -53,6 +54,7 @@ export interface CanvasEdgeInput {
   id: string;
   sourceNodeId: string;
   targetNodeId: string;
+  label?: string | null;
 }
 
 interface MindmapCanvasProps {
@@ -80,7 +82,7 @@ export default function MindmapCanvas({
   // Convert DB coordinates to React Flow node format
   const formatInitialNodes = useCallback((): Node[] => {
     return initialNodes.map((n) => {
-      const meta = n.metadata as Record<string, unknown> | null;
+      const meta = (n.metadata as Record<string, unknown> | null) || {};
       return {
         id: n.id,
         type: 'skill',
@@ -89,7 +91,11 @@ export default function MindmapCanvas({
           label: n.label,
           description: n.description || '',
           color: n.color || '#2563eb',
-          status: (meta?.status as 'planned' | 'in_progress' | 'completed') || 'planned',
+          status: (meta.status as 'planned' | 'in_progress' | 'completed') || 'planned',
+          tags: (meta.tags as string[]) || [],
+          tasks: (meta.tasks as TaskItem[]) || [],
+          links: (meta.links as ResourceLink[]) || [],
+          collapsed: Boolean(meta.collapsed),
         },
       };
     });
@@ -101,6 +107,8 @@ export default function MindmapCanvas({
       source: e.sourceNodeId,
       target: e.targetNodeId,
       type: 'skill',
+      label: e.label || '',
+      data: { label: e.label || '' },
     }));
   }, [initialEdges]);
 
@@ -127,11 +135,30 @@ export default function MindmapCanvas({
   const [shareCopied, setShareCopied] = useState(false);
   const [isShareLoading, setIsShareLoading] = useState(false);
 
+  // Quick Search & Filter (Cmd+F)
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchStatusFilter, setSearchStatusFilter] = useState<'all' | 'planned' | 'in_progress' | 'completed'>('all');
+
+  // Two-Way Markdown Outline Drawer
+  const [isOutlineOpen, setIsOutlineOpen] = useState(false);
+  const [outlineMarkdown, setOutlineMarkdown] = useState('');
+  const [isOutlineEditing, setIsOutlineEditing] = useState(false);
+
   // Selected Node fields for sidebar form
   const [nodeLabel, setNodeLabel] = useState('');
   const [nodeDesc, setNodeDesc] = useState('');
   const [nodeColor, setNodeColor] = useState('#2563eb');
   const [nodeStatus, setNodeStatus] = useState<'planned' | 'in_progress' | 'completed'>('planned');
+  const [nodeLinks, setNodeLinks] = useState<ResourceLink[]>([]);
+  const [nodeTasks, setNodeTasks] = useState<TaskItem[]>([]);
+  const [nodeTags, setNodeTags] = useState<string[]>([]);
+
+  // Sub-inputs inside sidebar
+  const [newLinkTitle, setNewLinkTitle] = useState('');
+  const [newLinkUrl, setNewLinkUrl] = useState('');
+  const [newTaskText, setNewTaskText] = useState('');
+  const [newTagText, setNewTagText] = useState('');
 
   // AI Copilot States
   const [aiSuggestions, setAiSuggestions] = useState<AISuggestion[]>([]);
@@ -146,6 +173,9 @@ export default function MindmapCanvas({
   const [aiImportMode, setAiImportMode] = useState<'merge' | 'replace'>('merge');
   const [aiImportPending, setAiImportPending] = useState(false);
   const [aiImportError, setAiImportError] = useState<string | null>(null);
+
+  // Snapped target indicator
+  const [snappedTargetId, setSnappedTargetId] = useState<string | null>(null);
 
   // Record History State Helper
   const recordHistory = useCallback(() => {
@@ -199,6 +229,9 @@ export default function MindmapCanvas({
       setNodeDesc((selectedNode.data.description as string) || '');
       setNodeColor((selectedNode.data.color as string) || '#2563eb');
       setNodeStatus((selectedNode.data.status as 'planned' | 'in_progress' | 'completed') || 'planned');
+      setNodeLinks((selectedNode.data.links as ResourceLink[]) || []);
+      setNodeTasks((selectedNode.data.tasks as TaskItem[]) || []);
+      setNodeTags((selectedNode.data.tags as string[]) || []);
       setAiSuggestions([]);
       setAiError(null);
     } else {
@@ -206,33 +239,90 @@ export default function MindmapCanvas({
       setNodeDesc('');
       setNodeColor('#2563eb');
       setNodeStatus('planned');
+      setNodeLinks([]);
+      setNodeTasks([]);
+      setNodeTags([]);
       setAiSuggestions([]);
       setAiError(null);
     }
   }, [selectedNode]);
 
-  // Compute visible elements based on collapsed nodes state
+  // Compute visible elements based on collapsed nodes state & depth hierarchy
   const { visibleNodes, visibleEdges } = useMemo(() => {
     const parentIds = new Set(edges.map((e) => e.source));
+    const targetToParent = new Map<string, string>();
+    const parentToChildren = new Map<string, string[]>();
+
+    edges.forEach((edge) => {
+      if (!targetToParent.has(edge.target)) {
+        targetToParent.set(edge.target, edge.source);
+      }
+      const children = parentToChildren.get(edge.source) || [];
+      children.push(edge.target);
+      parentToChildren.set(edge.source, children);
+    });
+
+    // Compute depth for every node
+    const depths = new Map<string, number>();
+    const computeDepth = (id: string, currentDepth: number, visited: Set<string>) => {
+      if (visited.has(id)) return;
+      visited.add(id);
+      depths.set(id, currentDepth);
+      const children = parentToChildren.get(id) || [];
+      children.forEach((cid) => computeDepth(cid, currentDepth + 1, visited));
+    };
+
+    const rootNodes = nodes.filter((n) => !targetToParent.has(n.id));
+    const visitedSet = new Set<string>();
+    rootNodes.forEach((r) => computeDepth(r.id, 0, visitedSet));
+    nodes.forEach((n) => {
+      if (!visitedSet.has(n.id)) computeDepth(n.id, 1, visitedSet);
+    });
+
+    const isSearchActive = searchQuery.trim().length > 0;
+    const q = searchQuery.toLowerCase().trim();
+
     const hydratedNodes = nodes.map((node) => {
       const hasChildren = parentIds.has(node.id);
+      const nodeDepth = depths.get(node.id) ?? 1;
+      const isRoot = nodeDepth === 0;
+
+      const label = (node.data?.label as string) || '';
+      const description = (node.data?.description as string) || '';
+      const tags = (node.data?.tags as string[]) || [];
+
+      const matchesSearch =
+        isSearchActive &&
+        (label.toLowerCase().includes(q) ||
+          description.toLowerCase().includes(q) ||
+          tags.some((t) => t.toLowerCase().includes(q)));
+
       return {
         ...node,
         data: {
           ...node.data,
           hasChildren,
-          collapsed: !!(node.data as { collapsed?: boolean })?.collapsed,
+          depth: nodeDepth,
+          isRoot,
+          isSearchMatch: matchesSearch,
+          collapsed: Boolean(node.data?.collapsed),
           readOnly,
           onUpdateLabel: (nodeId: string, newLabel: string) => {
             if (readOnly) return;
             recordHistory();
             setNodes((nds) =>
+              nds.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, label: newLabel } } : n))
+            );
+          },
+          onToggleTask: (nodeId: string, taskId: string) => {
+            if (readOnly) return;
+            recordHistory();
+            setNodes((nds) =>
               nds.map((n) => {
                 if (n.id === nodeId) {
-                  return {
-                    ...n,
-                    data: { ...n.data, label: newLabel },
-                  };
+                  const tasks = (n.data.tasks as TaskItem[]) || [];
+                  const nextTasks = tasks.map((t) => (t.id === taskId ? { ...t, done: !t.done } : t));
+                  return { ...n, data: { ...n.data, tasks: nextTasks } };
                 }
                 return n;
               })
@@ -246,7 +336,7 @@ export default function MindmapCanvas({
                     ...n,
                     data: {
                       ...n.data,
-                      collapsed: !(n.data as { collapsed?: boolean })?.collapsed,
+                      collapsed: !n.data?.collapsed,
                     },
                   };
                 }
@@ -260,24 +350,10 @@ export default function MindmapCanvas({
 
     const collapsedNodeIds = new Set<string>();
     hydratedNodes.forEach((n) => {
-      if (n.data?.collapsed) {
-        collapsedNodeIds.add(n.id);
-      }
+      if (n.data?.collapsed) collapsedNodeIds.add(n.id);
     });
-
-    if (collapsedNodeIds.size === 0) {
-      return { visibleNodes: hydratedNodes, visibleEdges: edges };
-    }
 
     const hiddenNodeIds = new Set<string>();
-    const parentToChildren = new Map<string, string[]>();
-
-    edges.forEach((edge) => {
-      const children = parentToChildren.get(edge.source) || [];
-      children.push(edge.target);
-      parentToChildren.set(edge.source, children);
-    });
-
     const hideDescendants = (nodeId: string) => {
       const children = parentToChildren.get(nodeId) || [];
       children.forEach((childId) => {
@@ -288,17 +364,33 @@ export default function MindmapCanvas({
       });
     };
 
-    collapsedNodeIds.forEach((id) => {
-      hideDescendants(id);
-    });
+    collapsedNodeIds.forEach((id) => hideDescendants(id));
 
     const visibleNodes = hydratedNodes.filter((n) => !hiddenNodeIds.has(n.id));
-    const visibleEdges = edges.filter(
-      (e) => !hiddenNodeIds.has(e.source) && !hiddenNodeIds.has(e.target)
-    );
+    const visibleEdges = edges
+      .filter((e) => !hiddenNodeIds.has(e.source) && !hiddenNodeIds.has(e.target))
+      .map((e) => ({
+        ...e,
+        data: {
+          ...e.data,
+          readOnly,
+          label: (e.data?.label as string) || (e as { label?: string }).label || '',
+          onUpdateEdgeLabel: (edgeId: string, nextLabel: string) => {
+            if (readOnly) return;
+            recordHistory();
+            setEdges((eds) =>
+              eds.map((ed) =>
+                ed.id === edgeId
+                  ? { ...ed, label: nextLabel, data: { ...ed.data, label: nextLabel } }
+                  : ed
+              )
+            );
+          },
+        },
+      }));
 
     return { visibleNodes, visibleEdges };
-  }, [nodes, edges, setNodes, readOnly, recordHistory]);
+  }, [nodes, edges, setNodes, setEdges, readOnly, recordHistory, searchQuery]);
 
   // Node selection handler
   const onNodeClick = useCallback((_: React.MouseEvent | TouchEvent, node: Node) => {
@@ -324,6 +416,64 @@ export default function MindmapCanvas({
     [setEdges, readOnly, recordHistory]
   );
 
+  // Drag-to-Reparent Snapping handler
+  const handleNodeDragStop = useCallback(
+    (_event: React.MouseEvent | MouseEvent | TouchEvent, draggedNode: Node) => {
+      if (readOnly) return;
+
+      const SNAP_DISTANCE = 90;
+      let targetNode: Node | null = null;
+
+      for (const n of nodes) {
+        if (n.id === draggedNode.id) continue;
+        const dx = Math.abs(n.position.x - draggedNode.position.x);
+        const dy = Math.abs(n.position.y - draggedNode.position.y);
+        if (dx < SNAP_DISTANCE && dy < SNAP_DISTANCE) {
+          targetNode = n;
+          break;
+        }
+      }
+
+      if (targetNode) {
+        // Cyclic safety check: ensure target is not a descendant of dragged node
+        const isDescendant = (parent: string, candidate: string): boolean => {
+          const directChildren = edges.filter((e) => e.source === parent).map((e) => e.target);
+          if (directChildren.includes(candidate)) return true;
+          return directChildren.some((child) => isDescendant(child, candidate));
+        };
+
+        if (!isDescendant(draggedNode.id, targetNode.id)) {
+          recordHistory();
+
+          // 1. Remove old incoming edge to draggedNode
+          const filteredEdges = edges.filter((e) => e.target !== draggedNode.id);
+
+          // 2. Add new edge targetNode -> draggedNode
+          const newEdge: Edge = {
+            id: `e-${uuidv4().substring(0, 8)}`,
+            source: targetNode.id,
+            target: draggedNode.id,
+            type: 'skill',
+          };
+
+          // 3. Position offset
+          const snappedPosition = {
+            x: targetNode.position.x + 280,
+            y: targetNode.position.y + 40,
+          };
+
+          setNodes((nds) =>
+            nds.map((n) => (n.id === draggedNode.id ? { ...n, position: snappedPosition } : n))
+          );
+          setEdges([...filteredEdges, newEdge]);
+          setSnappedTargetId(targetNode.id);
+          setTimeout(() => setSnappedTargetId(null), 1500);
+        }
+      }
+    },
+    [nodes, edges, readOnly, recordHistory, setNodes, setEdges]
+  );
+
   // Auto-save logic triggers when nodes or edges change
   useEffect(() => {
     if (readOnly) return;
@@ -333,18 +483,25 @@ export default function MindmapCanvas({
 
       const nodesData = nodes.map((n) => ({
         id: n.id,
-        label: n.data.label as string,
-        description: n.data.description as string,
+        label: (n.data.label as string) || '',
+        description: (n.data.description as string) || '',
         xPos: n.position.x,
         yPos: n.position.y,
-        color: n.data.color as string,
-        metadata: { status: n.data.status, collapsed: n.data.collapsed },
+        color: (n.data.color as string) || '#2563eb',
+        metadata: {
+          status: n.data.status,
+          collapsed: n.data.collapsed,
+          tags: n.data.tags,
+          tasks: n.data.tasks,
+          links: n.data.links,
+        },
       }));
 
       const edgesData = edges.map((e) => ({
         id: e.id,
         sourceNodeId: e.source,
         targetNodeId: e.target,
+        label: (e.data?.label as string) || (e as { label?: string }).label || undefined,
       }));
 
       startTransition(async () => {
@@ -374,7 +531,7 @@ export default function MindmapCanvas({
     if (readOnly) return;
     recordHistory();
     const id = `n-${uuidv4()}`;
-    const newNode = {
+    const newNode: Node = {
       id,
       type: 'skill',
       position: {
@@ -383,13 +540,16 @@ export default function MindmapCanvas({
       },
       data: {
         label: 'New Concept',
-        description: 'Double click to edit details in sidebar.',
+        description: '',
         color: '#2563eb',
-        status: 'planned' as const,
+        status: 'planned',
+        tags: [],
+        tasks: [],
+        links: [],
       },
     };
     setNodes((nds) => nds.concat(newNode));
-    setSelectedNode(newNode as unknown as Node);
+    setSelectedNode(newNode);
   };
 
   // Add Child Node to currently selected node (Shortcut: Tab)
@@ -412,7 +572,10 @@ export default function MindmapCanvas({
           label: 'New Sub-skill',
           description: '',
           color: (parent.data.color as string) || '#2563eb',
-          status: 'planned' as const,
+          status: 'planned',
+          tags: [],
+          tasks: [],
+          links: [],
         },
       };
 
@@ -453,7 +616,10 @@ export default function MindmapCanvas({
           label: 'New Sibling Skill',
           description: '',
           color: (current.data.color as string) || '#2563eb',
-          status: 'planned' as const,
+          status: 'planned',
+          tags: [],
+          tasks: [],
+          links: [],
         },
       };
 
@@ -490,6 +656,9 @@ export default function MindmapCanvas({
               description: nodeDesc,
               color: nodeColor,
               status: nodeStatus,
+              links: nodeLinks,
+              tasks: nodeTasks,
+              tags: nodeTags,
             },
           };
         }
@@ -507,6 +676,9 @@ export default function MindmapCanvas({
               description: nodeDesc,
               color: nodeColor,
               status: nodeStatus,
+              links: nodeLinks,
+              tasks: nodeTasks,
+              tags: nodeTags,
             },
           }
         : null
@@ -527,6 +699,13 @@ export default function MindmapCanvas({
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return;
+      }
+
+      // Cmd+F -> Search
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setIsSearchOpen((prev) => !prev);
         return;
       }
 
@@ -629,6 +808,68 @@ export default function MindmapCanvas({
     } finally {
       setIsShareLoading(false);
     }
+  };
+
+  // Outline Drawer Actions
+  const handleOpenOutline = () => {
+    const md = generateMarkdownOutline(
+      nodes.map((n) => ({
+        id: n.id,
+        data: {
+          label: (n.data.label as string) || '',
+          description: (n.data.description as string) || '',
+          status: (n.data.status as string) || 'planned',
+          tags: (n.data.tags as string[]) || [],
+        },
+      })),
+      edges.map((e) => ({ source: e.source, target: e.target }))
+    );
+    setOutlineMarkdown(md);
+    setIsOutlineOpen(true);
+  };
+
+  const handleApplyOutline = () => {
+    if (!outlineMarkdown.trim() || readOnly) return;
+    recordHistory();
+
+    const parsed = parseMarkdownOutline(outlineMarkdown);
+    const layoutNodes = parsed.nodes.map((n) => ({
+      id: n.id,
+      label: n.label,
+      description: n.description,
+      status: n.status,
+    }));
+
+    const positionedNodes = computeD3Layout(layoutNodes, parsed.edges, 'RADIAL_MINDMAP');
+
+    const nextNodes: Node[] = positionedNodes.map((pn) => {
+      const orig = parsed.nodes.find((o) => o.id === pn.id);
+      return {
+        id: pn.id,
+        type: 'skill',
+        position: pn.position,
+        data: {
+          ...pn.data,
+          tags: orig?.tags || [],
+          tasks: [],
+          links: [],
+        },
+      };
+    });
+
+    const nextEdges: Edge[] = parsed.edges.map((e, idx) => ({
+      id: `e-md-${idx}-${uuidv4().substring(0, 6)}`,
+      source: e.source,
+      target: e.target,
+      type: 'skill',
+    }));
+
+    setNodes(nextNodes);
+    setEdges(nextEdges);
+    setIsOutlineEditing(false);
+    setTimeout(() => {
+      rfInstance?.fitView({ duration: 400, padding: 0.2 });
+    }, 50);
   };
 
   // File Download Helpers
@@ -758,7 +999,7 @@ export default function MindmapCanvas({
         const importedEdges = parsed.edges;
 
         const nextNodes: Node[] = importedNodes.map((n) => {
-          const meta = n.metadata as Record<string, unknown> | null;
+          const meta = (n.metadata as Record<string, unknown> | null) || {};
           return {
             id: n.id,
             type: 'skill',
@@ -767,7 +1008,10 @@ export default function MindmapCanvas({
               label: n.label,
               description: n.description || '',
               color: n.color || '#2563eb',
-              status: (meta?.status as 'planned' | 'in_progress' | 'completed') || 'planned',
+              status: (meta.status as 'planned' | 'in_progress' | 'completed') || 'planned',
+              tags: [],
+              tasks: [],
+              links: [],
             },
           };
         });
@@ -870,6 +1114,9 @@ export default function MindmapCanvas({
             description: sug.description,
             color: '#7c3aed',
             status: 'planned' as const,
+            tags: [],
+            tasks: [],
+            links: [],
           },
         };
 
@@ -1017,7 +1264,7 @@ export default function MindmapCanvas({
     }
 
     const newId = `n-ai-${uuidv4()}`;
-    const newNode = {
+    const newNode: Node = {
       id: newId,
       type: 'skill',
       position: {
@@ -1028,11 +1275,14 @@ export default function MindmapCanvas({
         label: sug.label,
         description: sug.description,
         color: '#7c3aed',
-        status: 'planned' as const,
+        status: 'planned',
+        tags: [],
+        tasks: [],
+        links: [],
       },
     };
 
-    const newEdge = {
+    const newEdge: Edge = {
       id: `e-${uuidv4()}`,
       source: aiType === 'parent' ? newId : selectedNode.id,
       target: aiType === 'parent' ? selectedNode.id : newId,
@@ -1045,11 +1295,111 @@ export default function MindmapCanvas({
     setAiSuggestions((prev) => prev.filter((s) => s.label !== sug.label));
   };
 
+  // Search results list
+  const searchResults = useMemo(() => {
+    if (!searchQuery.trim()) return [];
+    const q = searchQuery.toLowerCase().trim();
+    return nodes.filter((n) => {
+      const label = (n.data.label as string) || '';
+      const description = (n.data.description as string) || '';
+      const tags = (n.data.tags as string[]) || [];
+      const status = (n.data.status as string) || 'planned';
+
+      const matchesStatus = searchStatusFilter === 'all' || status === searchStatusFilter;
+      const matchesQuery =
+        label.toLowerCase().includes(q) ||
+        description.toLowerCase().includes(q) ||
+        tags.some((t) => t.toLowerCase().includes(q));
+
+      return matchesStatus && matchesQuery;
+    });
+  }, [nodes, searchQuery, searchStatusFilter]);
+
+  const handleFocusSearchResult = (nodeId: string) => {
+    const target = nodes.find((n) => n.id === nodeId);
+    if (!target) return;
+    setSelectedNode(target);
+    rfInstance?.fitView({ nodes: [{ id: nodeId }], duration: 500, padding: 0.5 });
+  };
+
   const shareUrl = typeof window !== 'undefined' ? `${window.location.origin}/share/${mapId}` : '';
 
   return (
     <div className="flex-1 flex overflow-hidden relative">
-      {/* Workspace Panel */}
+      {/* LEFT OUTLINE DRAWER */}
+      {isOutlineOpen && (
+        <div className="w-80 border-r border-slate-200 bg-white h-full flex flex-col p-4 shadow-lg z-30 animate-in slide-in-from-left duration-200">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-3">
+            <h3 className="font-bold text-slate-900 text-sm flex items-center gap-1.5">
+              <span>📝</span> Outline View
+            </h3>
+            <div className="flex items-center gap-1">
+              {!readOnly && (
+                <button
+                  onClick={() => setIsOutlineEditing((prev) => !prev)}
+                  className={`text-xs px-2 py-1 rounded font-semibold transition ${
+                    isOutlineEditing ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  {isOutlineEditing ? 'View' : 'Edit'}
+                </button>
+              )}
+              <button
+                onClick={() => setIsOutlineOpen(false)}
+                className="text-slate-400 hover:text-slate-600 text-sm font-medium px-1.5"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+
+          {isOutlineEditing ? (
+            <div className="flex-1 flex flex-col gap-2">
+              <p className="text-[11px] text-slate-500">
+                Edit indented Markdown. Use <code className="bg-slate-100 px-1 rounded">- [x]</code> for completed, <code className="bg-slate-100 px-1 rounded">#tags</code> for tags.
+              </p>
+              <textarea
+                value={outlineMarkdown}
+                onChange={(e) => setOutlineMarkdown(e.target.value)}
+                className="flex-1 font-mono text-xs border border-slate-200 rounded-lg p-2.5 text-slate-800 outline-none focus:ring-1 focus:ring-blue-500 resize-none"
+              />
+              <button
+                onClick={handleApplyOutline}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs py-2 rounded-lg transition shadow-sm"
+              >
+                Apply Outline to Map
+              </button>
+            </div>
+          ) : (
+            <div className="flex-1 overflow-y-auto space-y-1">
+              {nodes.map((node) => {
+                const isSelected = selectedNode?.id === node.id;
+                const nodeDepth = (node.data.depth as number) ?? 0;
+                return (
+                  <div
+                    key={node.id}
+                    onClick={() => handleFocusSearchResult(node.id)}
+                    style={{ paddingLeft: `${Math.min(nodeDepth * 16, 64) + 8}px` }}
+                    className={`py-1.5 pr-2 rounded-lg text-xs flex items-center justify-between cursor-pointer transition ${
+                      isSelected ? 'bg-blue-50 text-blue-700 font-bold' : 'hover:bg-slate-50 text-slate-700'
+                    }`}
+                  >
+                    <span className="truncate">
+                      {node.data.status === 'completed' ? '✅' : node.data.status === 'in_progress' ? '🚀' : '⏳'}{' '}
+                      {(node.data.label as string) || 'Untitled'}
+                    </span>
+                    {node.data.depth === 0 && (
+                      <span className="text-[10px] bg-indigo-50 text-indigo-700 px-1.5 rounded font-bold">Root</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Main Workspace Area */}
       <div className="flex-1 h-full relative">
         <ReactFlow
           nodes={visibleNodes}
@@ -1059,6 +1409,7 @@ export default function MindmapCanvas({
           onConnect={onConnect}
           onNodeClick={onNodeClick}
           onPaneClick={onPaneClick}
+          onNodeDragStop={handleNodeDragStop}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
           onInit={setRfInstance}
@@ -1074,6 +1425,13 @@ export default function MindmapCanvas({
               zoomable
               pannable
             />
+          )}
+
+          {/* Drag Snapping Feedback Banner */}
+          {snappedTargetId && (
+            <Panel position="top-center" className="bg-emerald-600 text-white font-bold text-xs px-4 py-2 rounded-full shadow-xl animate-bounce">
+              ⚡ Reparented & Snapped to branch!
+            </Panel>
           )}
 
           {/* Header Panel */}
@@ -1106,9 +1464,7 @@ export default function MindmapCanvas({
 
             {/* Progress Summary Tracker */}
             <div className="flex items-center gap-2 bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-100">
-              <span className="text-xs font-bold text-slate-700">
-                🎯 {stats.percent}%
-              </span>
+              <span className="text-xs font-bold text-slate-700">🎯 {stats.percent}%</span>
               <span className="text-[11px] text-slate-400 font-medium hidden sm:inline">
                 ({stats.completed}/{stats.total} done)
               </span>
@@ -1149,6 +1505,26 @@ export default function MindmapCanvas({
             position="top-right"
             className="bg-white p-2.5 rounded-xl shadow-md border border-slate-200 flex flex-wrap items-center gap-1.5 max-w-2xl"
           >
+            {/* Outline Button */}
+            <button
+              onClick={handleOpenOutline}
+              className={`font-semibold text-xs px-2.5 py-1.5 rounded-lg transition flex items-center gap-1 border ${
+                isOutlineOpen ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
+              }`}
+              title="Toggle Markdown Outline View"
+            >
+              📝 Outline
+            </button>
+
+            {/* Quick Search Button */}
+            <button
+              onClick={() => setIsSearchOpen((prev) => !prev)}
+              className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-2.5 py-1.5 rounded-lg transition font-medium flex items-center gap-1 border border-slate-200"
+              title="Search and filter map (Cmd+F)"
+            >
+              🔍 Find
+            </button>
+
             {!readOnly && (
               <>
                 <button
@@ -1197,14 +1573,14 @@ export default function MindmapCanvas({
             </button>
             <button
               onClick={() => applyD3Layout('TB')}
-              className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-2 py-1.5 rounded-lg transition"
+              className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-2.5 py-1.5 rounded-lg transition"
               title="Hierarchical tree from Top to Bottom"
             >
               ⬇️ Vertical
             </button>
             <button
               onClick={() => applyD3Layout('LR')}
-              className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-2 py-1.5 rounded-lg transition"
+              className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-2.5 py-1.5 rounded-lg transition"
               title="Logic chart from Left to Right"
             >
               ➡️ Horizontal
@@ -1289,10 +1665,77 @@ export default function MindmapCanvas({
         </ReactFlow>
       </div>
 
-      {/* Selected Node Sidebar Form */}
+      {/* QUICK SEARCH POPOVER */}
+      {isSearchOpen && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 w-96 bg-white/95 backdrop-blur-md rounded-2xl shadow-2xl border border-slate-200 p-4 z-40 animate-in fade-in zoom-in duration-150">
+          <div className="flex items-center justify-between pb-2 border-b border-slate-100 mb-3">
+            <h4 className="font-bold text-xs uppercase tracking-wider text-slate-500">🔍 Quick Search & Filter</h4>
+            <button onClick={() => setIsSearchOpen(false)} className="text-slate-400 hover:text-slate-600 text-xs">
+              ✕
+            </button>
+          </div>
+
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Type skill name, notes, or #tag..."
+            autoFocus
+            className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2 text-slate-800 outline-none focus:ring-2 focus:ring-blue-500 mb-2"
+          />
+
+          <div className="flex gap-1 mb-3">
+            {(['all', 'planned', 'in_progress', 'completed'] as const).map((s) => (
+              <button
+                key={s}
+                onClick={() => setSearchStatusFilter(s)}
+                className={`flex-1 py-1 text-[11px] font-semibold rounded-md border capitalize transition ${
+                  searchStatusFilter === s
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                {s === 'all' ? 'All' : s === 'in_progress' ? 'Active' : s}
+              </button>
+            ))}
+          </div>
+
+          <div className="max-h-56 overflow-y-auto space-y-1">
+            {searchResults.length > 0 ? (
+              searchResults.map((node) => (
+                <div
+                  key={node.id}
+                  onClick={() => handleFocusSearchResult(node.id)}
+                  className="p-2 rounded-lg border border-slate-100 hover:bg-blue-50 hover:border-blue-200 transition cursor-pointer flex items-center justify-between group"
+                >
+                  <div className="overflow-hidden">
+                    <p className="text-xs font-bold text-slate-800 group-hover:text-blue-700 truncate">
+                      {(node.data.label as string) || 'Untitled'}
+                    </p>
+                    {node.data.description ? (
+                      <p className="text-[10px] text-slate-400 truncate mt-0.5">
+                        {node.data.description as string}
+                      </p>
+                    ) : null}
+                  </div>
+                  <span className="text-[10px] bg-slate-100 px-1.5 py-0.5 rounded font-medium text-slate-600 capitalize">
+                    {node.data.status as string}
+                  </span>
+                </div>
+              ))
+            ) : searchQuery.trim() ? (
+              <p className="text-xs text-slate-400 text-center py-4">No matching nodes found.</p>
+            ) : (
+              <p className="text-xs text-slate-400 text-center py-4">Start typing to search the roadmap...</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* SELECTED NODE SIDEBAR FORM */}
       {selectedNode && !readOnly && (
-        <div className="w-80 border-l border-slate-200 bg-white h-full flex flex-col p-6 shadow-xl z-20 overflow-y-auto">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-6">
+        <div className="w-84 border-l border-slate-200 bg-white h-full flex flex-col p-6 shadow-xl z-20 overflow-y-auto">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-5">
             <h3 className="font-bold text-slate-900 text-lg">Edit Node</h3>
             <button
               onClick={() => setSelectedNode(null)}
@@ -1361,10 +1804,175 @@ export default function MindmapCanvas({
               </select>
             </div>
 
-            <div className="pt-2 flex flex-col gap-2">
+            {/* TAGS SECTION */}
+            <div className="pt-2 border-t border-slate-100">
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                Tags (#hashtag)
+              </label>
+              <div className="flex flex-wrap gap-1 mb-2">
+                {nodeTags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md"
+                  >
+                    #{tag}
+                    <button
+                      onClick={() => setNodeTags((prev) => prev.filter((t) => t !== tag))}
+                      className="text-slate-400 hover:text-red-500 font-bold"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <div className="flex gap-1.5">
+                <input
+                  type="text"
+                  value={newTagText}
+                  onChange={(e) => setNewTagText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && newTagText.trim()) {
+                      e.preventDefault();
+                      const cleanTag = newTagText.trim().replace(/^#/, '');
+                      if (!nodeTags.includes(cleanTag)) setNodeTags((prev) => [...prev, cleanTag]);
+                      setNewTagText('');
+                    }
+                  }}
+                  placeholder="e.g. backend, priority"
+                  className="flex-1 text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-800 outline-none"
+                />
+                <button
+                  onClick={() => {
+                    if (newTagText.trim()) {
+                      const cleanTag = newTagText.trim().replace(/^#/, '');
+                      if (!nodeTags.includes(cleanTag)) setNodeTags((prev) => [...prev, cleanTag]);
+                      setNewTagText('');
+                    }
+                  }}
+                  className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition"
+                >
+                  + Tag
+                </button>
+              </div>
+            </div>
+
+            {/* CHECKLIST / SUB-TASKS */}
+            <div className="pt-2 border-t border-slate-100">
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                Sub-task Checklist
+              </label>
+              <div className="space-y-1.5 mb-2">
+                {nodeTasks.map((task) => (
+                  <div key={task.id} className="flex items-center justify-between gap-1 text-xs bg-slate-50 p-1.5 rounded-lg border border-slate-200">
+                    <label className="flex items-center gap-1.5 flex-1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={task.done}
+                        onChange={() => {
+                          setNodeTasks((prev) =>
+                            prev.map((t) => (t.id === task.id ? { ...t, done: !t.done } : t))
+                          );
+                        }}
+                        className="rounded text-blue-600"
+                      />
+                      <span className={`truncate ${task.done ? 'line-through text-slate-400' : 'text-slate-800'}`}>
+                        {task.text}
+                      </span>
+                    </label>
+                    <button
+                      onClick={() => setNodeTasks((prev) => prev.filter((t) => t.id !== task.id))}
+                      className="text-slate-400 hover:text-red-500 font-bold px-1"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-1.5">
+                <input
+                  type="text"
+                  value={newTaskText}
+                  onChange={(e) => setNewTaskText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && newTaskText.trim()) {
+                      e.preventDefault();
+                      setNodeTasks((prev) => [...prev, { id: uuidv4().substring(0, 6), text: newTaskText.trim(), done: false }]);
+                      setNewTaskText('');
+                    }
+                  }}
+                  placeholder="Add action item / exercise..."
+                  className="flex-1 text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-800 outline-none"
+                />
+                <button
+                  onClick={() => {
+                    if (newTaskText.trim()) {
+                      setNodeTasks((prev) => [...prev, { id: uuidv4().substring(0, 6), text: newTaskText.trim(), done: false }]);
+                      setNewTaskText('');
+                    }
+                  }}
+                  className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition"
+                >
+                  + Task
+                </button>
+              </div>
+            </div>
+
+            {/* RESOURCE LINKS */}
+            <div className="pt-2 border-t border-slate-100">
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                Resource Links & Docs
+              </label>
+              <div className="space-y-1.5 mb-2">
+                {nodeLinks.map((link, idx) => (
+                  <div key={idx} className="flex items-center justify-between gap-1 text-xs bg-slate-50 p-1.5 rounded-lg border border-slate-200">
+                    <a href={link.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 font-medium truncate hover:underline flex items-center gap-1">
+                      <span>🔗</span> {link.title || link.url}
+                    </a>
+                    <button
+                      onClick={() => setNodeLinks((prev) => prev.filter((_, i) => i !== idx))}
+                      className="text-slate-400 hover:text-red-500 font-bold px-1"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="space-y-1.5">
+                <input
+                  type="text"
+                  value={newLinkTitle}
+                  onChange={(e) => setNewLinkTitle(e.target.value)}
+                  placeholder="Link Title (e.g. Official Docs)"
+                  className="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-800 outline-none"
+                />
+                <div className="flex gap-1.5">
+                  <input
+                    type="url"
+                    value={newLinkUrl}
+                    onChange={(e) => setNewLinkUrl(e.target.value)}
+                    placeholder="https://..."
+                    className="flex-1 text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-800 outline-none"
+                  />
+                  <button
+                    onClick={() => {
+                      if (newLinkUrl.trim()) {
+                        setNodeLinks((prev) => [...prev, { title: newLinkTitle.trim() || 'Link', url: newLinkUrl.trim() }]);
+                        setNewLinkTitle('');
+                        setNewLinkUrl('');
+                      }
+                    }}
+                    className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition"
+                  >
+                    + Link
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-3 flex flex-col gap-2 border-t border-slate-100">
               <button
                 onClick={handleUpdateNode}
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm py-2 rounded-lg transition"
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm py-2 rounded-lg transition shadow-sm"
               >
                 Apply Changes
               </button>
