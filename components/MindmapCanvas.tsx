@@ -21,8 +21,9 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { toPng } from 'html-to-image';
-import { SkillNode, ResourceLink, TaskItem } from './SkillNode';
+import { SkillNode, ResourceLink, TaskItem, CanvasTheme } from './SkillNode';
 import { SkillEdge } from './SkillEdge';
+import { VoiceMindmapModal } from './VoiceMindmapModal';
 import { saveMapData } from '@/app/actions/nodes-edges';
 import { renameMindmap, toggleMindmapPublic } from '@/app/actions/mindmaps';
 import { computeD3Layout, LayoutDirection } from '@/lib/layout';
@@ -71,6 +72,44 @@ interface AISuggestion {
   description: string;
 }
 
+const themeCanvasConfig: Record<
+  CanvasTheme,
+  { bg: string; dot: string; panelBg: string; text: string; subText: string; border: string }
+> = {
+  light: {
+    bg: '#f8fafc',
+    dot: '#94a3b8',
+    panelBg: 'bg-white',
+    text: 'text-slate-800',
+    subText: 'text-slate-400',
+    border: 'border-slate-200',
+  },
+  dark: {
+    bg: '#090d16',
+    dot: '#334155',
+    panelBg: 'bg-slate-900/95',
+    text: 'text-slate-100',
+    subText: 'text-slate-500',
+    border: 'border-slate-800',
+  },
+  neon: {
+    bg: '#030712',
+    dot: '#06b6d4',
+    panelBg: 'bg-gray-950/95',
+    text: 'text-cyan-100',
+    subText: 'text-cyan-500',
+    border: 'border-cyan-800/70',
+  },
+  sepia: {
+    bg: '#f7f3ea',
+    dot: '#c4b5a0',
+    panelBg: 'bg-[#fffdfa]/95',
+    text: 'text-[#3d2b1f]',
+    subText: 'text-[#8c7764]',
+    border: 'border-[#ded3be]',
+  },
+};
+
 export default function MindmapCanvas({
   mapId,
   initialTitle,
@@ -79,6 +118,25 @@ export default function MindmapCanvas({
   initialEdges,
   readOnly = false,
 }: MindmapCanvasProps) {
+  // Theme State with localStorage Persistence
+  const [theme, setTheme] = useState<CanvasTheme>('light');
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('k-mind-theme') as CanvasTheme | null;
+      if (saved && ['light', 'dark', 'neon', 'sepia'].includes(saved)) {
+        setTheme(saved);
+      }
+    }
+  }, []);
+
+  const handleSetTheme = (newTheme: CanvasTheme) => {
+    setTheme(newTheme);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('k-mind-theme', newTheme);
+    }
+  };
+
   // Convert DB coordinates to React Flow node format
   const formatInitialNodes = useCallback((): Node[] => {
     return initialNodes.map((n) => {
@@ -96,6 +154,7 @@ export default function MindmapCanvas({
           tasks: (meta.tasks as TaskItem[]) || [],
           links: (meta.links as ResourceLink[]) || [],
           collapsed: Boolean(meta.collapsed),
+          theme: 'light',
         },
       };
     });
@@ -108,7 +167,7 @@ export default function MindmapCanvas({
       target: e.targetNodeId,
       type: 'skill',
       label: e.label || '',
-      data: { label: e.label || '' },
+      data: { label: e.label || '', theme: 'light' },
     }));
   }, [initialEdges]);
 
@@ -144,6 +203,11 @@ export default function MindmapCanvas({
   const [isOutlineOpen, setIsOutlineOpen] = useState(false);
   const [outlineMarkdown, setOutlineMarkdown] = useState('');
   const [isOutlineEditing, setIsOutlineEditing] = useState(false);
+
+  // Voice Brainstorming Modal States
+  const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
+  const [voiceGenerating, setVoiceGenerating] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
 
   // Selected Node fields for sidebar form
   const [nodeLabel, setNodeLabel] = useState('');
@@ -247,7 +311,7 @@ export default function MindmapCanvas({
     }
   }, [selectedNode]);
 
-  // Compute visible elements based on collapsed nodes state & depth hierarchy
+  // Compute visible elements based on collapsed nodes state & depth hierarchy & theme
   const { visibleNodes, visibleEdges } = useMemo(() => {
     const parentIds = new Set(edges.map((e) => e.source));
     const targetToParent = new Map<string, string>();
@@ -301,6 +365,7 @@ export default function MindmapCanvas({
         ...node,
         data: {
           ...node.data,
+          theme,
           hasChildren,
           depth: nodeDepth,
           isRoot,
@@ -373,6 +438,7 @@ export default function MindmapCanvas({
         ...e,
         data: {
           ...e.data,
+          theme,
           readOnly,
           label: (e.data?.label as string) || (e as { label?: string }).label || '',
           onUpdateEdgeLabel: (edgeId: string, nextLabel: string) => {
@@ -381,7 +447,7 @@ export default function MindmapCanvas({
             setEdges((eds) =>
               eds.map((ed) =>
                 ed.id === edgeId
-                  ? { ...ed, label: nextLabel, data: { ...ed.data, label: nextLabel } }
+                  ? { ...ed, label: nextLabel, data: { ...ed.data, label: nextLabel, theme } }
                   : ed
               )
             );
@@ -390,7 +456,7 @@ export default function MindmapCanvas({
       }));
 
     return { visibleNodes, visibleEdges };
-  }, [nodes, edges, setNodes, setEdges, readOnly, recordHistory, searchQuery]);
+  }, [nodes, edges, setNodes, setEdges, readOnly, recordHistory, searchQuery, theme]);
 
   // Node selection handler
   const onNodeClick = useCallback((_: React.MouseEvent | TouchEvent, node: Node) => {
@@ -410,10 +476,11 @@ export default function MindmapCanvas({
         ...params,
         id: `e-${uuidv4()}`,
         type: 'skill',
+        data: { theme },
       };
       setEdges((eds) => addEdge(newEdge, eds));
     },
-    [setEdges, readOnly, recordHistory]
+    [setEdges, readOnly, recordHistory, theme]
   );
 
   // Drag-to-Reparent Snapping handler
@@ -454,6 +521,7 @@ export default function MindmapCanvas({
             source: targetNode.id,
             target: draggedNode.id,
             type: 'skill',
+            data: { theme },
           };
 
           // 3. Position offset
@@ -471,7 +539,7 @@ export default function MindmapCanvas({
         }
       }
     },
-    [nodes, edges, readOnly, recordHistory, setNodes, setEdges]
+    [nodes, edges, readOnly, recordHistory, setNodes, setEdges, theme]
   );
 
   // Auto-save logic triggers when nodes or edges change
@@ -546,6 +614,7 @@ export default function MindmapCanvas({
         tags: [],
         tasks: [],
         links: [],
+        theme,
       },
     };
     setNodes((nds) => nds.concat(newNode));
@@ -576,6 +645,7 @@ export default function MindmapCanvas({
           tags: [],
           tasks: [],
           links: [],
+          theme,
         },
       };
 
@@ -584,13 +654,14 @@ export default function MindmapCanvas({
         source: parentId,
         target: newId,
         type: 'skill',
+        data: { theme },
       };
 
       setNodes((nds) => nds.concat(newNode));
       setEdges((eds) => eds.concat(newEdge));
       setSelectedNode(newNode);
     },
-    [nodes, setNodes, setEdges, readOnly, recordHistory]
+    [nodes, setNodes, setEdges, readOnly, recordHistory, theme]
   );
 
   // Add Sibling Node (Shortcut: Enter)
@@ -610,7 +681,7 @@ export default function MindmapCanvas({
         type: 'skill',
         position: {
           x: current.position.x,
-          y: current.position.y + 120,
+          y: current.position.y + 140,
         },
         data: {
           label: 'New Sibling Skill',
@@ -620,6 +691,7 @@ export default function MindmapCanvas({
           tags: [],
           tasks: [],
           links: [],
+          theme,
         },
       };
 
@@ -631,13 +703,14 @@ export default function MindmapCanvas({
           source: parentId,
           target: newId,
           type: 'skill',
+          data: { theme },
         };
         setEdges((eds) => eds.concat(newEdge));
       }
 
       setSelectedNode(newNode);
     },
-    [nodes, edges, setNodes, setEdges, readOnly, recordHistory]
+    [nodes, edges, setNodes, setEdges, readOnly, recordHistory, theme]
   );
 
   // Update selected Node detail
@@ -789,7 +862,6 @@ export default function MindmapCanvas({
       })
     );
 
-    // Smoothly animate camera to frame the newly formatted layout
     setTimeout(() => {
       rfInstance?.fitView({ duration: 400, padding: 0.2 });
     }, 50);
@@ -850,6 +922,7 @@ export default function MindmapCanvas({
         position: pn.position,
         data: {
           ...pn.data,
+          theme,
           tags: orig?.tags || [],
           tasks: [],
           links: [],
@@ -862,6 +935,7 @@ export default function MindmapCanvas({
       source: e.source,
       target: e.target,
       type: 'skill',
+      data: { theme },
     }));
 
     setNodes(nextNodes);
@@ -970,8 +1044,8 @@ export default function MindmapCanvas({
 
     try {
       const dataUrl = await toPng(element, {
-        backgroundColor: '#f8fafc',
-        pixelRatio: 2, // 2x Retina resolution
+        backgroundColor: themeCanvasConfig[theme].bg,
+        pixelRatio: 2,
       });
       const a = document.createElement('a');
       a.href = dataUrl;
@@ -1012,6 +1086,7 @@ export default function MindmapCanvas({
               tags: [],
               tasks: [],
               links: [],
+              theme,
             },
           };
         });
@@ -1021,6 +1096,7 @@ export default function MindmapCanvas({
           source: ed.sourceNodeId,
           target: ed.targetNodeId,
           type: 'skill',
+          data: { theme },
         }));
 
         setNodes(nextNodes);
@@ -1099,7 +1175,7 @@ export default function MindmapCanvas({
 
       suggestions.forEach((sug, idx) => {
         const newId = `n-ai-${uuidv4().substring(0, 8)}`;
-        const yOffset = (idx - (suggestions.length - 1) / 2) * 120;
+        const yOffset = (idx - (suggestions.length - 1) / 2) * 140;
         const xOffset = type === 'child' ? 320 : -320;
 
         const newNode: Node = {
@@ -1117,6 +1193,7 @@ export default function MindmapCanvas({
             tags: [],
             tasks: [],
             links: [],
+            theme,
           },
         };
 
@@ -1125,6 +1202,7 @@ export default function MindmapCanvas({
           source: type === 'parent' ? newId : selectedNode.id,
           target: type === 'parent' ? selectedNode.id : newId,
           type: 'skill',
+          data: { theme },
         };
 
         newNodesList.push(newNode);
@@ -1184,12 +1262,18 @@ export default function MindmapCanvas({
       recordHistory();
 
       if (aiImportMode === 'replace') {
-        setNodes(positionedNodes);
+        setNodes(
+          positionedNodes.map((n) => ({
+            ...n,
+            data: { ...n.data, theme, tags: [], tasks: [], links: [] },
+          }))
+        );
         const nextEdges = rawEdges.map((e: AIEdge, index: number) => ({
           id: `e-${index}-${uuidv4().substring(0, 8)}`,
           source: e.source,
           target: e.target,
           type: 'skill',
+          data: { theme },
         }));
         setEdges(nextEdges);
         setSelectedNode(null);
@@ -1206,7 +1290,7 @@ export default function MindmapCanvas({
             x: n.position.x + offset.x,
             y: n.position.y + offset.y,
           },
-          data: n.data,
+          data: { ...n.data, theme, tags: [], tasks: [], links: [] },
         }));
 
         const mergedEdges = rawEdges.map((e: AIEdge, index: number) => ({
@@ -1214,6 +1298,7 @@ export default function MindmapCanvas({
           source: `${mergePrefix}${e.source}`,
           target: `${mergePrefix}${e.target}`,
           type: 'skill',
+          data: { theme },
         }));
 
         if (selectedNode) {
@@ -1226,6 +1311,7 @@ export default function MindmapCanvas({
               source: selectedNode.id,
               target: `${mergePrefix}${r.id}`,
               type: 'skill',
+              data: { theme },
             });
           });
         }
@@ -1246,6 +1332,113 @@ export default function MindmapCanvas({
       setAiImportError(errMsg || 'An error occurred during AI import.');
     } finally {
       setAiImportPending(false);
+    }
+  };
+
+  // Voice-to-Mindmap Generation Handler
+  const handleVoiceGenerate = async (transcript: string, voiceMode: 'merge' | 'replace') => {
+    setVoiceGenerating(true);
+    setVoiceError(null);
+
+    try {
+      const response = await fetch('/api/ai/generate-map', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: transcript }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to generate mind map from voice.');
+      }
+
+      interface AINode {
+        id: string;
+        label: string;
+        description: string;
+      }
+
+      interface AIEdge {
+        source: string;
+        target: string;
+      }
+
+      const rawNodes = data.nodes as AINode[];
+      const rawEdges = data.edges as AIEdge[];
+
+      const positionedNodes = computeD3Layout(rawNodes, rawEdges, 'RADIAL_MINDMAP');
+
+      recordHistory();
+
+      if (voiceMode === 'replace') {
+        setNodes(
+          positionedNodes.map((n) => ({
+            ...n,
+            data: { ...n.data, theme, tags: [], tasks: [], links: [] },
+          }))
+        );
+        const nextEdges = rawEdges.map((e: AIEdge, index: number) => ({
+          id: `e-v-${index}-${uuidv4().substring(0, 8)}`,
+          source: e.source,
+          target: e.target,
+          type: 'skill',
+          data: { theme },
+        }));
+        setEdges(nextEdges);
+        setSelectedNode(null);
+      } else {
+        const mergePrefix = `voice-${uuidv4().substring(0, 8)}-`;
+        const offset = selectedNode
+          ? { x: selectedNode.position.x + 350, y: selectedNode.position.y }
+          : { x: 100, y: 100 };
+
+        const mergedNodes = positionedNodes.map((n) => ({
+          id: `${mergePrefix}${n.id}`,
+          type: n.type,
+          position: {
+            x: n.position.x + offset.x,
+            y: n.position.y + offset.y,
+          },
+          data: { ...n.data, theme, tags: [], tasks: [], links: [] },
+        }));
+
+        const mergedEdges = rawEdges.map((e: AIEdge, index: number) => ({
+          id: `e-vmerge-${index}-${uuidv4().substring(0, 8)}`,
+          source: `${mergePrefix}${e.source}`,
+          target: `${mergePrefix}${e.target}`,
+          type: 'skill',
+          data: { theme },
+        }));
+
+        if (selectedNode) {
+          const targetIds = new Set(rawEdges.map((e: AIEdge) => e.target));
+          const subGraphRoots = rawNodes.filter((n: AINode) => !targetIds.has(n.id));
+
+          subGraphRoots.forEach((r: AINode) => {
+            mergedEdges.push({
+              id: `e-vlink-${uuidv4().substring(0, 8)}`,
+              source: selectedNode.id,
+              target: `${mergePrefix}${r.id}`,
+              type: 'skill',
+              data: { theme },
+            });
+          });
+        }
+
+        setNodes((nds) => nds.concat(mergedNodes));
+        setEdges((eds) => eds.concat(mergedEdges));
+      }
+
+      setIsVoiceModalOpen(false);
+      setTimeout(() => {
+        rfInstance?.fitView({ duration: 400, padding: 0.2 });
+      }, 50);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setVoiceError(errMsg || 'An error occurred during voice generation.');
+    } finally {
+      setVoiceGenerating(false);
     }
   };
 
@@ -1279,6 +1472,7 @@ export default function MindmapCanvas({
         tags: [],
         tasks: [],
         links: [],
+        theme,
       },
     };
 
@@ -1287,6 +1481,7 @@ export default function MindmapCanvas({
       source: aiType === 'parent' ? newId : selectedNode.id,
       target: aiType === 'parent' ? selectedNode.id : newId,
       type: 'skill',
+      data: { theme },
     };
 
     setNodes((nds) => nds.concat(newNode));
@@ -1323,14 +1518,20 @@ export default function MindmapCanvas({
   };
 
   const shareUrl = typeof window !== 'undefined' ? `${window.location.origin}/share/${mapId}` : '';
+  const currentCanvasConfig = themeCanvasConfig[theme] || themeCanvasConfig.light;
 
   return (
-    <div className="flex-1 flex overflow-hidden relative">
+    <div
+      className="flex-1 flex overflow-hidden relative transition-colors duration-300"
+      style={{ backgroundColor: currentCanvasConfig.bg }}
+    >
       {/* LEFT OUTLINE DRAWER */}
       {isOutlineOpen && (
-        <div className="w-80 border-r border-slate-200 bg-white h-full flex flex-col p-4 shadow-lg z-30 animate-in slide-in-from-left duration-200">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-3">
-            <h3 className="font-bold text-slate-900 text-sm flex items-center gap-1.5">
+        <div
+          className={`w-80 border-r ${currentCanvasConfig.border} ${currentCanvasConfig.panelBg} h-full flex flex-col p-4 shadow-2xl z-30 animate-in slide-in-from-left duration-200`}
+        >
+          <div className={`flex items-center justify-between border-b ${currentCanvasConfig.border} pb-3 mb-3`}>
+            <h3 className={`font-bold text-sm flex items-center gap-1.5 ${currentCanvasConfig.text}`}>
               <span>📝</span> Outline View
             </h3>
             <div className="flex items-center gap-1">
@@ -1338,7 +1539,9 @@ export default function MindmapCanvas({
                 <button
                   onClick={() => setIsOutlineEditing((prev) => !prev)}
                   className={`text-xs px-2 py-1 rounded font-semibold transition ${
-                    isOutlineEditing ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    isOutlineEditing
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200'
                   }`}
                 >
                   {isOutlineEditing ? 'View' : 'Edit'}
@@ -1355,13 +1558,13 @@ export default function MindmapCanvas({
 
           {isOutlineEditing ? (
             <div className="flex-1 flex flex-col gap-2">
-              <p className="text-[11px] text-slate-500">
-                Edit indented Markdown. Use <code className="bg-slate-100 px-1 rounded">- [x]</code> for completed, <code className="bg-slate-100 px-1 rounded">#tags</code> for tags.
+              <p className={`text-[11px] ${currentCanvasConfig.subText}`}>
+                Edit indented Markdown. Use <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded">- [x]</code> for completed, <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded">#tags</code> for tags.
               </p>
               <textarea
                 value={outlineMarkdown}
                 onChange={(e) => setOutlineMarkdown(e.target.value)}
-                className="flex-1 font-mono text-xs border border-slate-200 rounded-lg p-2.5 text-slate-800 outline-none focus:ring-1 focus:ring-blue-500 resize-none"
+                className={`flex-1 font-mono text-xs border ${currentCanvasConfig.border} bg-white dark:bg-slate-800 rounded-lg p-2.5 ${currentCanvasConfig.text} outline-none focus:ring-1 focus:ring-blue-500 resize-none`}
               />
               <button
                 onClick={handleApplyOutline}
@@ -1381,7 +1584,9 @@ export default function MindmapCanvas({
                     onClick={() => handleFocusSearchResult(node.id)}
                     style={{ paddingLeft: `${Math.min(nodeDepth * 16, 64) + 8}px` }}
                     className={`py-1.5 pr-2 rounded-lg text-xs flex items-center justify-between cursor-pointer transition ${
-                      isSelected ? 'bg-blue-50 text-blue-700 font-bold' : 'hover:bg-slate-50 text-slate-700'
+                      isSelected
+                        ? 'bg-blue-500/20 text-blue-500 font-bold'
+                        : `hover:bg-slate-500/10 ${currentCanvasConfig.text}`
                     }`}
                   >
                     <span className="truncate">
@@ -1389,7 +1594,7 @@ export default function MindmapCanvas({
                       {(node.data.label as string) || 'Untitled'}
                     </span>
                     {node.data.depth === 0 && (
-                      <span className="text-[10px] bg-indigo-50 text-indigo-700 px-1.5 rounded font-bold">Root</span>
+                      <span className="text-[10px] bg-indigo-500/20 text-indigo-400 px-1.5 rounded font-bold">Root</span>
                     )}
                   </div>
                 );
@@ -1415,12 +1620,17 @@ export default function MindmapCanvas({
           onInit={setRfInstance}
           fitView
         >
-          <Background variant={BackgroundVariant.Dots} gap={12} size={1} />
-          <Controls className="bg-white border border-slate-200 shadow-md rounded-xl overflow-hidden" />
+          <Background
+            variant={BackgroundVariant.Dots}
+            gap={14}
+            size={1.2}
+            color={currentCanvasConfig.dot}
+          />
+          <Controls className={`${currentCanvasConfig.panelBg} ${currentCanvasConfig.border} border shadow-md rounded-xl overflow-hidden`} />
 
           {showMiniMap && (
             <MiniMap
-              className="bg-white border border-slate-200 shadow-xl rounded-xl overflow-hidden"
+              className={`${currentCanvasConfig.panelBg} ${currentCanvasConfig.border} border shadow-xl rounded-xl overflow-hidden`}
               nodeColor={(n) => (n.data?.color as string) || '#2563eb'}
               zoomable
               pannable
@@ -1437,7 +1647,7 @@ export default function MindmapCanvas({
           {/* Header Panel */}
           <Panel
             position="top-left"
-            className="bg-white p-3 rounded-xl shadow-md border border-slate-200 flex items-center gap-3"
+            className={`${currentCanvasConfig.panelBg} p-3 rounded-2xl shadow-lg border ${currentCanvasConfig.border} flex items-center gap-3`}
           >
             {isEditingTitle && !readOnly ? (
               <input
@@ -1446,29 +1656,29 @@ export default function MindmapCanvas({
                 onChange={(e) => setTitle(e.target.value)}
                 onBlur={handleRename}
                 onKeyDown={(e) => e.key === 'Enter' && handleRename()}
-                className="text-base font-bold text-slate-800 border border-slate-300 rounded px-2 py-0.5 focus:outline-none"
+                className={`text-base font-bold ${currentCanvasConfig.text} bg-transparent border border-slate-400 rounded px-2 py-0.5 focus:outline-none`}
                 autoFocus
               />
             ) : (
               <h2
-                className={`text-base font-bold text-slate-800 flex items-center gap-1 ${
-                  readOnly ? '' : 'cursor-pointer hover:text-blue-600'
+                className={`text-base font-bold ${currentCanvasConfig.text} flex items-center gap-1 ${
+                  readOnly ? '' : 'cursor-pointer hover:text-blue-500'
                 }`}
                 onClick={() => !readOnly && setIsEditingTitle(true)}
               >
-                🧠 {title} {!readOnly && <span className="text-xs font-normal text-slate-400">✏️</span>}
+                🧠 {title} {!readOnly && <span className="text-xs font-normal opacity-60">✏️</span>}
               </h2>
             )}
 
-            <div className="h-4 w-px bg-slate-200"></div>
+            <div className={`h-4 w-px ${currentCanvasConfig.border} border-r`}></div>
 
             {/* Progress Summary Tracker */}
-            <div className="flex items-center gap-2 bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-100">
-              <span className="text-xs font-bold text-slate-700">🎯 {stats.percent}%</span>
-              <span className="text-[11px] text-slate-400 font-medium hidden sm:inline">
+            <div className="flex items-center gap-2 bg-slate-500/10 px-2.5 py-1 rounded-lg border border-slate-500/20">
+              <span className={`text-xs font-bold ${currentCanvasConfig.text}`}>🎯 {stats.percent}%</span>
+              <span className={`text-[11px] ${currentCanvasConfig.subText} font-medium hidden sm:inline`}>
                 ({stats.completed}/{stats.total} done)
               </span>
-              <div className="w-16 bg-slate-200 h-2 rounded-full overflow-hidden flex">
+              <div className="w-16 bg-slate-500/20 h-2 rounded-full overflow-hidden flex">
                 <div
                   className="bg-emerald-500 h-full transition-all duration-300"
                   style={{ width: `${stats.percent}%` }}
@@ -1478,8 +1688,8 @@ export default function MindmapCanvas({
 
             {!readOnly && (
               <>
-                <div className="h-4 w-px bg-slate-200"></div>
-                <span className="text-xs font-semibold px-2 py-1 rounded bg-slate-100 flex items-center gap-1">
+                <div className={`h-4 w-px ${currentCanvasConfig.border} border-r`}></div>
+                <span className="text-xs font-semibold px-2 py-1 rounded bg-slate-500/10 flex items-center gap-1">
                   {saveStatus === 'saved' && <span className="text-emerald-500">● Saved</span>}
                   {saveStatus === 'saving' && <span className="text-amber-500 animate-pulse">● Saving...</span>}
                   {saveStatus === 'error' && <span className="text-red-500">● Sync Error</span>}
@@ -1489,12 +1699,12 @@ export default function MindmapCanvas({
                   onClick={() => setIsShareModalOpen(true)}
                   className={`text-xs font-semibold px-2.5 py-1 rounded-lg transition flex items-center gap-1 border ${
                     isPublic
-                      ? 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
-                      : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                      ? 'bg-blue-500/20 text-blue-400 border-blue-500/30 hover:bg-blue-500/30'
+                      : 'bg-slate-500/10 text-slate-400 border-slate-500/20 hover:bg-slate-500/20'
                   }`}
                   title="Share read-only roadmap link"
                 >
-                  🔗 {isPublic ? 'Shared (Public)' : 'Share'}
+                  🔗 {isPublic ? 'Public' : 'Share'}
                 </button>
               </>
             )}
@@ -1503,13 +1713,47 @@ export default function MindmapCanvas({
           {/* Action Toolbar */}
           <Panel
             position="top-right"
-            className="bg-white p-2.5 rounded-xl shadow-md border border-slate-200 flex flex-wrap items-center gap-1.5 max-w-2xl"
+            className={`${currentCanvasConfig.panelBg} p-2.5 rounded-2xl shadow-lg border ${currentCanvasConfig.border} flex flex-wrap items-center gap-1.5 max-w-3xl`}
           >
+            {/* Theme Selector */}
+            <div className="flex items-center bg-slate-500/10 p-0.5 rounded-lg border border-slate-500/20">
+              {(['light', 'dark', 'neon', 'sepia'] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => handleSetTheme(t)}
+                  className={`text-xs px-2 py-1 rounded-md font-semibold transition capitalize flex items-center gap-1 ${
+                    theme === t
+                      ? 'bg-blue-600 text-white shadow-sm font-bold'
+                      : `${currentCanvasConfig.subText} hover:${currentCanvasConfig.text}`
+                  }`}
+                  title={`Switch to ${t} theme`}
+                >
+                  <span>{t === 'light' ? '☀️' : t === 'dark' ? '🌙' : t === 'neon' ? '⚡' : '📜'}</span>
+                  <span className="hidden xl:inline">{t}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className={`w-px h-5 ${currentCanvasConfig.border} border-r mx-0.5`}></div>
+
+            {/* Voice-to-Mindmap Button */}
+            {!readOnly && (
+              <button
+                onClick={() => setIsVoiceModalOpen(true)}
+                className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition shadow-md flex items-center gap-1.5 cursor-pointer"
+                title="Speak out loud to brainstorm mind map with AI"
+              >
+                <span>🎙️</span> Voice
+              </button>
+            )}
+
             {/* Outline Button */}
             <button
               onClick={handleOpenOutline}
               className={`font-semibold text-xs px-2.5 py-1.5 rounded-lg transition flex items-center gap-1 border ${
-                isOutlineOpen ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
+                isOutlineOpen
+                  ? 'bg-indigo-600 text-white border-indigo-600'
+                  : 'bg-slate-500/10 text-slate-400 border-slate-500/20 hover:bg-slate-500/20'
               }`}
               title="Toggle Markdown Outline View"
             >
@@ -1519,7 +1763,7 @@ export default function MindmapCanvas({
             {/* Quick Search Button */}
             <button
               onClick={() => setIsSearchOpen((prev) => !prev)}
-              className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-2.5 py-1.5 rounded-lg transition font-medium flex items-center gap-1 border border-slate-200"
+              className="bg-slate-500/10 hover:bg-slate-500/20 text-slate-400 text-xs px-2.5 py-1.5 rounded-lg transition font-medium flex items-center gap-1 border border-slate-500/20"
               title="Search and filter map (Cmd+F)"
             >
               🔍 Find
@@ -1535,11 +1779,11 @@ export default function MindmapCanvas({
                   + Add Node
                 </button>
 
-                <div className="flex gap-0.5 bg-slate-100 p-0.5 rounded-lg">
+                <div className="flex gap-0.5 bg-slate-500/10 p-0.5 rounded-lg border border-slate-500/20">
                   <button
                     onClick={handleUndo}
                     disabled={history.length === 0}
-                    className="hover:bg-white disabled:opacity-30 text-slate-700 text-xs px-2 py-1 rounded transition"
+                    className="hover:bg-slate-500/20 disabled:opacity-30 text-xs px-2 py-1 rounded transition"
                     title="Undo (Cmd+Z)"
                   >
                     ↩️
@@ -1547,7 +1791,7 @@ export default function MindmapCanvas({
                   <button
                     onClick={handleRedo}
                     disabled={future.length === 0}
-                    className="hover:bg-white disabled:opacity-30 text-slate-700 text-xs px-2 py-1 rounded transition"
+                    className="hover:bg-slate-500/20 disabled:opacity-30 text-xs px-2 py-1 rounded transition"
                     title="Redo (Cmd+Shift+Z)"
                   >
                     ↪️
@@ -1559,34 +1803,34 @@ export default function MindmapCanvas({
             {/* Layout Triggers */}
             <button
               onClick={() => applyD3Layout('RADIAL_MINDMAP')}
-              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium text-xs px-2.5 py-1.5 rounded-lg transition"
+              className="bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 font-medium text-xs px-2.5 py-1.5 rounded-lg transition border border-indigo-500/20"
               title="Classic balanced Mind Map radiating symmetrically from center"
             >
               🧠 Mind Map
             </button>
             <button
               onClick={() => applyD3Layout('RADIAL_360')}
-              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium text-xs px-2.5 py-1.5 rounded-lg transition"
-              title="Full 360-degree circular starburst with automatic collision-free radius scaling"
+              className="bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 font-medium text-xs px-2.5 py-1.5 rounded-lg transition border border-indigo-500/20"
+              title="Full 360-degree circular starburst"
             >
               🌐 Radial 360°
             </button>
             <button
               onClick={() => applyD3Layout('TB')}
-              className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-2.5 py-1.5 rounded-lg transition"
+              className="bg-slate-500/10 hover:bg-slate-500/20 text-slate-400 font-medium text-xs px-2.5 py-1.5 rounded-lg transition border border-slate-500/20"
               title="Hierarchical tree from Top to Bottom"
             >
               ⬇️ Vertical
             </button>
             <button
               onClick={() => applyD3Layout('LR')}
-              className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs px-2.5 py-1.5 rounded-lg transition"
+              className="bg-slate-500/10 hover:bg-slate-500/20 text-slate-400 font-medium text-xs px-2.5 py-1.5 rounded-lg transition border border-slate-500/20"
               title="Logic chart from Left to Right"
             >
               ➡️ Horizontal
             </button>
 
-            <div className="w-px h-5 bg-slate-200 mx-0.5"></div>
+            <div className={`w-px h-5 ${currentCanvasConfig.border} border-r mx-0.5`}></div>
 
             {/* Export Actions */}
             <div className="flex gap-1">
@@ -1622,16 +1866,15 @@ export default function MindmapCanvas({
 
             {!readOnly && (
               <>
-                <div className="w-px h-5 bg-slate-200 mx-0.5"></div>
-                {/* Import Actions */}
+                <div className={`w-px h-5 ${currentCanvasConfig.border} border-r mx-0.5`}></div>
                 <button
                   onClick={() => setIsAiImportOpen(true)}
-                  className="bg-purple-50 hover:bg-purple-100 text-purple-700 font-semibold text-xs px-2.5 py-1.5 rounded-lg transition"
+                  className="bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 font-semibold text-xs px-2.5 py-1.5 rounded-lg transition border border-purple-500/30"
                   title="Build map automatically from text list using AI"
                 >
                   ✨ AI Import
                 </button>
-                <label className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-2 py-1.5 rounded-lg cursor-pointer transition">
+                <label className="bg-slate-500/10 hover:bg-slate-500/20 text-slate-400 text-xs px-2 py-1.5 rounded-lg cursor-pointer transition border border-slate-500/20">
                   OPML
                   <input
                     type="file"
@@ -1640,7 +1883,7 @@ export default function MindmapCanvas({
                     className="hidden"
                   />
                 </label>
-                <label className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-2 py-1.5 rounded-lg cursor-pointer transition">
+                <label className="bg-slate-500/10 hover:bg-slate-500/20 text-slate-400 text-xs px-2 py-1.5 rounded-lg cursor-pointer transition border border-slate-500/20">
                   FreeMind
                   <input
                     type="file"
@@ -1654,8 +1897,10 @@ export default function MindmapCanvas({
 
             <button
               onClick={() => setShowMiniMap((prev) => !prev)}
-              className={`text-xs px-2 py-1.5 rounded-lg transition ${
-                showMiniMap ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+              className={`text-xs px-2 py-1.5 rounded-lg transition border ${
+                showMiniMap
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-slate-500/10 hover:bg-slate-500/20 text-slate-400 border-slate-500/20'
               }`}
               title="Toggle MiniMap"
             >
@@ -1667,9 +1912,13 @@ export default function MindmapCanvas({
 
       {/* QUICK SEARCH POPOVER */}
       {isSearchOpen && (
-        <div className="absolute top-16 left-1/2 -translate-x-1/2 w-96 bg-white/95 backdrop-blur-md rounded-2xl shadow-2xl border border-slate-200 p-4 z-40 animate-in fade-in zoom-in duration-150">
-          <div className="flex items-center justify-between pb-2 border-b border-slate-100 mb-3">
-            <h4 className="font-bold text-xs uppercase tracking-wider text-slate-500">🔍 Quick Search & Filter</h4>
+        <div
+          className={`absolute top-16 left-1/2 -translate-x-1/2 w-96 ${currentCanvasConfig.panelBg} backdrop-blur-md rounded-2xl shadow-2xl border ${currentCanvasConfig.border} p-4 z-40 animate-in fade-in zoom-in duration-150`}
+        >
+          <div className={`flex items-center justify-between pb-2 border-b ${currentCanvasConfig.border} mb-3`}>
+            <h4 className={`font-bold text-xs uppercase tracking-wider ${currentCanvasConfig.subText}`}>
+              🔍 Quick Search & Filter
+            </h4>
             <button onClick={() => setIsSearchOpen(false)} className="text-slate-400 hover:text-slate-600 text-xs">
               ✕
             </button>
@@ -1681,7 +1930,7 @@ export default function MindmapCanvas({
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Type skill name, notes, or #tag..."
             autoFocus
-            className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2 text-slate-800 outline-none focus:ring-2 focus:ring-blue-500 mb-2"
+            className={`w-full text-sm border ${currentCanvasConfig.border} bg-white dark:bg-slate-800 rounded-xl px-3 py-2 ${currentCanvasConfig.text} outline-none focus:ring-2 focus:ring-blue-500 mb-2`}
           />
 
           <div className="flex gap-1 mb-3">
@@ -1692,7 +1941,7 @@ export default function MindmapCanvas({
                 className={`flex-1 py-1 text-[11px] font-semibold rounded-md border capitalize transition ${
                   searchStatusFilter === s
                     ? 'bg-blue-600 text-white border-blue-600'
-                    : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                    : 'bg-slate-500/10 text-slate-400 border-slate-500/20 hover:bg-slate-500/20'
                 }`}
               >
                 {s === 'all' ? 'All' : s === 'in_progress' ? 'Active' : s}
@@ -1706,27 +1955,29 @@ export default function MindmapCanvas({
                 <div
                   key={node.id}
                   onClick={() => handleFocusSearchResult(node.id)}
-                  className="p-2 rounded-lg border border-slate-100 hover:bg-blue-50 hover:border-blue-200 transition cursor-pointer flex items-center justify-between group"
+                  className={`p-2 rounded-lg border ${currentCanvasConfig.border} hover:bg-blue-500/20 transition cursor-pointer flex items-center justify-between group`}
                 >
                   <div className="overflow-hidden">
-                    <p className="text-xs font-bold text-slate-800 group-hover:text-blue-700 truncate">
+                    <p className={`text-xs font-bold ${currentCanvasConfig.text} group-hover:text-blue-400 truncate`}>
                       {(node.data.label as string) || 'Untitled'}
                     </p>
                     {node.data.description ? (
-                      <p className="text-[10px] text-slate-400 truncate mt-0.5">
+                      <p className={`text-[10px] ${currentCanvasConfig.subText} truncate mt-0.5`}>
                         {node.data.description as string}
                       </p>
                     ) : null}
                   </div>
-                  <span className="text-[10px] bg-slate-100 px-1.5 py-0.5 rounded font-medium text-slate-600 capitalize">
+                  <span className="text-[10px] bg-slate-500/10 px-1.5 py-0.5 rounded font-medium text-slate-400 capitalize">
                     {node.data.status as string}
                   </span>
                 </div>
               ))
             ) : searchQuery.trim() ? (
-              <p className="text-xs text-slate-400 text-center py-4">No matching nodes found.</p>
+              <p className={`text-xs ${currentCanvasConfig.subText} text-center py-4`}>No matching nodes found.</p>
             ) : (
-              <p className="text-xs text-slate-400 text-center py-4">Start typing to search the roadmap...</p>
+              <p className={`text-xs ${currentCanvasConfig.subText} text-center py-4`}>
+                Start typing to search the roadmap...
+              </p>
             )}
           </div>
         </div>
@@ -1734,9 +1985,11 @@ export default function MindmapCanvas({
 
       {/* SELECTED NODE SIDEBAR FORM */}
       {selectedNode && !readOnly && (
-        <div className="w-84 border-l border-slate-200 bg-white h-full flex flex-col p-6 shadow-xl z-20 overflow-y-auto">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-5">
-            <h3 className="font-bold text-slate-900 text-lg">Edit Node</h3>
+        <div
+          className={`w-84 border-l ${currentCanvasConfig.border} ${currentCanvasConfig.panelBg} h-full flex flex-col p-6 shadow-2xl z-20 overflow-y-auto`}
+        >
+          <div className={`flex items-center justify-between border-b ${currentCanvasConfig.border} pb-4 mb-5`}>
+            <h3 className={`font-bold ${currentCanvasConfig.text} text-lg`}>Edit Node</h3>
             <button
               onClick={() => setSelectedNode(null)}
               className="text-slate-400 hover:text-slate-600 text-sm font-medium"
@@ -1747,31 +2000,31 @@ export default function MindmapCanvas({
 
           <div className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+              <label className={`block text-xs font-semibold ${currentCanvasConfig.subText} uppercase tracking-wider mb-1`}>
                 Node Label
               </label>
               <input
                 type="text"
                 value={nodeLabel}
                 onChange={(e) => setNodeLabel(e.target.value)}
-                className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className={`w-full text-sm border ${currentCanvasConfig.border} bg-white dark:bg-slate-800 rounded-lg px-3 py-2 ${currentCanvasConfig.text} focus:outline-none focus:ring-1 focus:ring-blue-500`}
               />
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+              <label className={`block text-xs font-semibold ${currentCanvasConfig.subText} uppercase tracking-wider mb-1`}>
                 Description / Notes
               </label>
               <textarea
                 value={nodeDesc}
                 onChange={(e) => setNodeDesc(e.target.value)}
                 rows={3}
-                className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className={`w-full text-sm border ${currentCanvasConfig.border} bg-white dark:bg-slate-800 rounded-lg px-3 py-2 ${currentCanvasConfig.text} focus:outline-none focus:ring-1 focus:ring-blue-500`}
               />
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+              <label className={`block text-xs font-semibold ${currentCanvasConfig.subText} uppercase tracking-wider mb-1`}>
                 Node Color
               </label>
               <div className="grid grid-cols-5 gap-2 mt-1">
@@ -1781,7 +2034,7 @@ export default function MindmapCanvas({
                     type="button"
                     onClick={() => setNodeColor(c)}
                     className={`h-8 rounded-lg border-2 transition ${
-                      nodeColor === c ? 'border-slate-800 scale-110 shadow-sm' : 'border-transparent'
+                      nodeColor === c ? 'border-blue-500 scale-110 shadow-md' : 'border-transparent'
                     }`}
                     style={{ backgroundColor: c }}
                   />
@@ -1790,13 +2043,13 @@ export default function MindmapCanvas({
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+              <label className={`block text-xs font-semibold ${currentCanvasConfig.subText} uppercase tracking-wider mb-1`}>
                 Progress Status
               </label>
               <select
                 value={nodeStatus}
                 onChange={(e) => setNodeStatus(e.target.value as 'planned' | 'in_progress' | 'completed')}
-                className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className={`w-full text-sm border ${currentCanvasConfig.border} bg-white dark:bg-slate-800 rounded-lg px-3 py-2 ${currentCanvasConfig.text} focus:outline-none focus:ring-1 focus:ring-blue-500`}
               >
                 <option value="planned">Planned (⏳)</option>
                 <option value="in_progress">In Progress (🚀)</option>
@@ -1805,15 +2058,15 @@ export default function MindmapCanvas({
             </div>
 
             {/* TAGS SECTION */}
-            <div className="pt-2 border-t border-slate-100">
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+            <div className={`pt-2 border-t ${currentCanvasConfig.border}`}>
+              <label className={`block text-xs font-semibold ${currentCanvasConfig.subText} uppercase tracking-wider mb-1`}>
                 Tags (#hashtag)
               </label>
               <div className="flex flex-wrap gap-1 mb-2">
                 {nodeTags.map((tag) => (
                   <span
                     key={tag}
-                    className="inline-flex items-center gap-1 text-[11px] font-semibold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md"
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold bg-slate-500/10 text-slate-300 px-2 py-0.5 rounded-md border border-slate-500/20"
                   >
                     #{tag}
                     <button
@@ -1839,7 +2092,7 @@ export default function MindmapCanvas({
                     }
                   }}
                   placeholder="e.g. backend, priority"
-                  className="flex-1 text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-800 outline-none"
+                  className={`flex-1 text-xs border ${currentCanvasConfig.border} bg-white dark:bg-slate-800 rounded-lg px-2.5 py-1.5 ${currentCanvasConfig.text} outline-none`}
                 />
                 <button
                   onClick={() => {
@@ -1849,7 +2102,7 @@ export default function MindmapCanvas({
                       setNewTagText('');
                     }
                   }}
-                  className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition"
+                  className="bg-slate-500/10 hover:bg-slate-500/20 text-slate-300 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition border border-slate-500/20"
                 >
                   + Tag
                 </button>
@@ -1857,13 +2110,16 @@ export default function MindmapCanvas({
             </div>
 
             {/* CHECKLIST / SUB-TASKS */}
-            <div className="pt-2 border-t border-slate-100">
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+            <div className={`pt-2 border-t ${currentCanvasConfig.border}`}>
+              <label className={`block text-xs font-semibold ${currentCanvasConfig.subText} uppercase tracking-wider mb-1`}>
                 Sub-task Checklist
               </label>
               <div className="space-y-1.5 mb-2">
                 {nodeTasks.map((task) => (
-                  <div key={task.id} className="flex items-center justify-between gap-1 text-xs bg-slate-50 p-1.5 rounded-lg border border-slate-200">
+                  <div
+                    key={task.id}
+                    className={`flex items-center justify-between gap-1 text-xs bg-slate-500/10 p-1.5 rounded-lg border ${currentCanvasConfig.border}`}
+                  >
                     <label className="flex items-center gap-1.5 flex-1 cursor-pointer">
                       <input
                         type="checkbox"
@@ -1875,7 +2131,7 @@ export default function MindmapCanvas({
                         }}
                         className="rounded text-blue-600"
                       />
-                      <span className={`truncate ${task.done ? 'line-through text-slate-400' : 'text-slate-800'}`}>
+                      <span className={`truncate ${task.done ? 'line-through opacity-50' : currentCanvasConfig.text}`}>
                         {task.text}
                       </span>
                     </label>
@@ -1896,21 +2152,27 @@ export default function MindmapCanvas({
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && newTaskText.trim()) {
                       e.preventDefault();
-                      setNodeTasks((prev) => [...prev, { id: uuidv4().substring(0, 6), text: newTaskText.trim(), done: false }]);
+                      setNodeTasks((prev) => [
+                        ...prev,
+                        { id: uuidv4().substring(0, 6), text: newTaskText.trim(), done: false },
+                      ]);
                       setNewTaskText('');
                     }
                   }}
                   placeholder="Add action item / exercise..."
-                  className="flex-1 text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-800 outline-none"
+                  className={`flex-1 text-xs border ${currentCanvasConfig.border} bg-white dark:bg-slate-800 rounded-lg px-2.5 py-1.5 ${currentCanvasConfig.text} outline-none`}
                 />
                 <button
                   onClick={() => {
                     if (newTaskText.trim()) {
-                      setNodeTasks((prev) => [...prev, { id: uuidv4().substring(0, 6), text: newTaskText.trim(), done: false }]);
+                      setNodeTasks((prev) => [
+                        ...prev,
+                        { id: uuidv4().substring(0, 6), text: newTaskText.trim(), done: false },
+                      ]);
                       setNewTaskText('');
                     }
                   }}
-                  className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition"
+                  className="bg-slate-500/10 hover:bg-slate-500/20 text-slate-300 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition border border-slate-500/20"
                 >
                   + Task
                 </button>
@@ -1918,14 +2180,22 @@ export default function MindmapCanvas({
             </div>
 
             {/* RESOURCE LINKS */}
-            <div className="pt-2 border-t border-slate-100">
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+            <div className={`pt-2 border-t ${currentCanvasConfig.border}`}>
+              <label className={`block text-xs font-semibold ${currentCanvasConfig.subText} uppercase tracking-wider mb-1`}>
                 Resource Links & Docs
               </label>
               <div className="space-y-1.5 mb-2">
                 {nodeLinks.map((link, idx) => (
-                  <div key={idx} className="flex items-center justify-between gap-1 text-xs bg-slate-50 p-1.5 rounded-lg border border-slate-200">
-                    <a href={link.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 font-medium truncate hover:underline flex items-center gap-1">
+                  <div
+                    key={idx}
+                    className={`flex items-center justify-between gap-1 text-xs bg-slate-500/10 p-1.5 rounded-lg border ${currentCanvasConfig.border}`}
+                  >
+                    <a
+                      href={link.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-400 font-medium truncate hover:underline flex items-center gap-1"
+                    >
                       <span>🔗</span> {link.title || link.url}
                     </a>
                     <button
@@ -1943,7 +2213,7 @@ export default function MindmapCanvas({
                   value={newLinkTitle}
                   onChange={(e) => setNewLinkTitle(e.target.value)}
                   placeholder="Link Title (e.g. Official Docs)"
-                  className="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-800 outline-none"
+                  className={`w-full text-xs border ${currentCanvasConfig.border} bg-white dark:bg-slate-800 rounded-lg px-2.5 py-1.5 ${currentCanvasConfig.text} outline-none`}
                 />
                 <div className="flex gap-1.5">
                   <input
@@ -1951,17 +2221,20 @@ export default function MindmapCanvas({
                     value={newLinkUrl}
                     onChange={(e) => setNewLinkUrl(e.target.value)}
                     placeholder="https://..."
-                    className="flex-1 text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-800 outline-none"
+                    className={`flex-1 text-xs border ${currentCanvasConfig.border} bg-white dark:bg-slate-800 rounded-lg px-2.5 py-1.5 ${currentCanvasConfig.text} outline-none`}
                   />
                   <button
                     onClick={() => {
                       if (newLinkUrl.trim()) {
-                        setNodeLinks((prev) => [...prev, { title: newLinkTitle.trim() || 'Link', url: newLinkUrl.trim() }]);
+                        setNodeLinks((prev) => [
+                          ...prev,
+                          { title: newLinkTitle.trim() || 'Link', url: newLinkUrl.trim() },
+                        ]);
                         setNewLinkTitle('');
                         setNewLinkUrl('');
                       }
                     }}
-                    className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition"
+                    className="bg-slate-500/10 hover:bg-slate-500/20 text-slate-300 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition border border-slate-500/20"
                   >
                     + Link
                   </button>
@@ -1969,7 +2242,7 @@ export default function MindmapCanvas({
               </div>
             </div>
 
-            <div className="pt-3 flex flex-col gap-2 border-t border-slate-100">
+            <div className={`pt-3 flex flex-col gap-2 border-t ${currentCanvasConfig.border}`}>
               <button
                 onClick={handleUpdateNode}
                 className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm py-2 rounded-lg transition shadow-sm"
@@ -1979,14 +2252,14 @@ export default function MindmapCanvas({
               <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={() => handleAddChildNode(selectedNode.id)}
-                  className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs py-2 rounded-lg transition"
+                  className="bg-slate-500/10 hover:bg-slate-500/20 text-slate-300 font-medium text-xs py-2 rounded-lg transition border border-slate-500/20"
                   title="Shortcut: Tab"
                 >
                   + Sub-node (Tab)
                 </button>
                 <button
                   onClick={handleDeleteNode}
-                  className="border border-red-200 text-red-600 hover:bg-red-50 font-medium text-xs py-2 rounded-lg transition"
+                  className="border border-red-500/30 text-red-400 hover:bg-red-500/10 font-medium text-xs py-2 rounded-lg transition"
                   title="Shortcut: Delete"
                 >
                   Delete (Del)
@@ -1996,11 +2269,11 @@ export default function MindmapCanvas({
           </div>
 
           {/* 1-CLICK AI EXPANDER & SUGGESTIONS */}
-          <div className="mt-6 border-t border-slate-100 pt-6">
-            <h4 className="font-bold text-slate-900 text-sm mb-2 flex items-center gap-1.5">
+          <div className={`mt-6 border-t ${currentCanvasConfig.border} pt-6`}>
+            <h4 className={`font-bold ${currentCanvasConfig.text} text-sm mb-2 flex items-center gap-1.5`}>
               <span>🔮</span> AI Branch Expander
             </h4>
-            <p className="text-xs text-slate-500 mb-3">
+            <p className={`text-xs ${currentCanvasConfig.subText} mb-3`}>
               Generate and link sub-skills or prerequisites automatically with Gemini.
             </p>
 
@@ -2015,7 +2288,7 @@ export default function MindmapCanvas({
               <button
                 onClick={() => handleAutoExpandBranch('parent')}
                 disabled={aiAutoExpanding}
-                className="bg-purple-100 hover:bg-purple-200 text-purple-700 disabled:opacity-50 font-semibold text-xs py-2 px-3 rounded-lg transition border border-purple-200"
+                className="bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 disabled:opacity-50 font-semibold text-xs py-2 px-3 rounded-lg transition border border-purple-500/30"
               >
                 {aiAutoExpanding ? 'Generating...' : '✨ Auto Prereqs'}
               </button>
@@ -2028,8 +2301,8 @@ export default function MindmapCanvas({
                   onClick={() => setAiType(t)}
                   className={`flex-1 text-center py-1 text-xs font-semibold rounded-md border transition capitalize ${
                     aiType === t
-                      ? 'bg-purple-100 text-purple-700 border-purple-200'
-                      : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                      ? 'bg-purple-500/30 text-purple-300 border-purple-500/40'
+                      : 'border-slate-500/20 text-slate-400 hover:bg-slate-500/10'
                   }`}
                 >
                   {t === 'child' ? 'Sub-skills' : t === 'sibling' ? 'Siblings' : 'Prereqs'}
@@ -2040,30 +2313,30 @@ export default function MindmapCanvas({
             <button
               onClick={handleGetAISuggestions}
               disabled={aiLoading}
-              className="w-full bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-800 font-medium text-xs py-2 rounded-lg transition border border-slate-200"
+              className={`w-full bg-slate-500/10 hover:bg-slate-500/20 disabled:opacity-50 ${currentCanvasConfig.text} font-medium text-xs py-2 rounded-lg transition border ${currentCanvasConfig.border}`}
             >
               {aiLoading ? 'Thinking...' : 'Browse Suggestions'}
             </button>
 
             {aiError && (
-              <p className="mt-3 text-xs text-red-600 bg-red-50 p-2 rounded border border-red-100">
+              <p className="mt-3 text-xs text-red-400 bg-red-950/40 p-2 rounded border border-red-800">
                 {aiError}
               </p>
             )}
 
             {aiSuggestions.length > 0 && (
               <div className="mt-4 space-y-3">
-                <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                <p className={`text-[10px] uppercase font-bold ${currentCanvasConfig.subText} tracking-wider`}>
                   Suggestions (click + to add to map)
                 </p>
                 {aiSuggestions.map((sug) => (
                   <div
                     key={sug.label}
-                    className="p-3 border border-purple-100 rounded-xl bg-purple-50/50 hover:bg-purple-50 transition flex items-start justify-between gap-2 group"
+                    className={`p-3 border ${currentCanvasConfig.border} rounded-xl bg-purple-500/10 hover:bg-purple-500/20 transition flex items-start justify-between gap-2 group`}
                   >
                     <div className="overflow-hidden">
-                      <p className="text-xs font-bold text-slate-900">{sug.label}</p>
-                      <p className="text-[11px] text-slate-500 mt-0.5 line-clamp-2 leading-relaxed">
+                      <p className={`text-xs font-bold ${currentCanvasConfig.text}`}>{sug.label}</p>
+                      <p className={`text-[11px] ${currentCanvasConfig.subText} mt-0.5 line-clamp-2 leading-relaxed`}>
                         {sug.description}
                       </p>
                     </div>
@@ -2082,12 +2355,22 @@ export default function MindmapCanvas({
         </div>
       )}
 
+      {/* VOICE BRAINSTORM MODAL */}
+      <VoiceMindmapModal
+        isOpen={isVoiceModalOpen}
+        onClose={() => setIsVoiceModalOpen(false)}
+        selectedNodeLabel={selectedNode?.data?.label as string | undefined}
+        onGenerateMap={handleVoiceGenerate}
+        isGenerating={voiceGenerating}
+        error={voiceError}
+      />
+
       {/* SHARE MODAL */}
       {isShareModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-100">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-4">
-              <h3 className="font-bold text-slate-900 text-lg flex items-center gap-2">
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200 dark:border-slate-800">
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4 mb-4">
+              <h3 className="font-bold text-slate-900 dark:text-white text-lg flex items-center gap-2">
                 <span>🔗</span> Share Mind Map
               </h3>
               <button
@@ -2095,17 +2378,17 @@ export default function MindmapCanvas({
                   setIsShareModalOpen(false);
                   setShareCopied(false);
                 }}
-                className="text-slate-400 hover:text-slate-600 text-sm font-medium"
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-sm font-medium"
               >
                 ✕ Close
               </button>
             </div>
 
             <div className="space-y-4">
-              <div className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200">
+              <div className="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700">
                 <div>
-                  <p className="font-bold text-sm text-slate-800">Public Access</p>
-                  <p className="text-xs text-slate-500">
+                  <p className="font-bold text-sm text-slate-800 dark:text-slate-100">Public Access</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
                     Anyone with the link can view this roadmap without signing in.
                   </p>
                 </div>
@@ -2113,7 +2396,7 @@ export default function MindmapCanvas({
                   onClick={handleTogglePublic}
                   disabled={isShareLoading}
                   className={`w-12 h-6 flex items-center rounded-full p-1 transition duration-300 cursor-pointer ${
-                    isPublic ? 'bg-blue-600 justify-end' : 'bg-slate-300 justify-start'
+                    isPublic ? 'bg-blue-600 justify-end' : 'bg-slate-300 dark:bg-slate-700 justify-start'
                   }`}
                 >
                   <div className="bg-white w-4 h-4 rounded-full shadow-md"></div>
@@ -2122,7 +2405,7 @@ export default function MindmapCanvas({
 
               {isPublic ? (
                 <div>
-                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">
                     Shareable URL
                   </label>
                   <div className="flex gap-2">
@@ -2130,7 +2413,7 @@ export default function MindmapCanvas({
                       type="text"
                       readOnly
                       value={shareUrl}
-                      className="flex-1 text-xs border border-slate-300 rounded-lg px-3 py-2 bg-slate-50 text-slate-700 font-mono select-all"
+                      className="flex-1 text-xs border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-mono select-all"
                     />
                     <button
                       onClick={() => {
@@ -2145,7 +2428,7 @@ export default function MindmapCanvas({
                   </div>
                 </div>
               ) : (
-                <p className="text-xs text-amber-600 bg-amber-50 p-3 rounded-lg border border-amber-200">
+                <p className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-950/40 dark:text-amber-300 p-3 rounded-lg border border-amber-200 dark:border-amber-900">
                   ⚠️ This map is currently private. Enable Public Access above to share this link.
                 </p>
               )}
@@ -2156,10 +2439,10 @@ export default function MindmapCanvas({
 
       {/* AI LIST IMPORT MODAL */}
       {isAiImportOpen && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-100">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-4">
-              <h3 className="font-bold text-slate-900 text-lg flex items-center gap-1.5">
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 dark:border-slate-800">
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4 mb-4">
+              <h3 className="font-bold text-slate-900 dark:text-white text-lg flex items-center gap-1.5">
                 <span>✨</span> AI List-to-Map Importer
               </h3>
               <button
@@ -2168,13 +2451,13 @@ export default function MindmapCanvas({
                   setAiImportText('');
                   setAiImportError(null);
                 }}
-                className="text-slate-400 hover:text-slate-600 text-sm font-medium"
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-sm font-medium"
               >
                 ✕ Close
               </button>
             </div>
 
-            <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-4 leading-relaxed">
               Paste a raw list of skills, syllabus bullets, or career milestones. Gemini will
               automatically extract hierarchy, categories, and prerequisites to build your map!
             </p>
@@ -2184,11 +2467,11 @@ export default function MindmapCanvas({
               value={aiImportText}
               onChange={(e) => setAiImportText(e.target.value)}
               placeholder="e.g.&#10;Frontend Engineering:&#10;- HTML/CSS: Flexbox, Grid&#10;- JavaScript: Async/Await, Promises&#10;- React: Hooks, Server Components, Next.js"
-              className="w-full text-sm border border-slate-300 rounded-xl p-3 text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+              className="w-full text-sm border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 rounded-2xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
             />
 
             <div className="mt-4 flex items-center gap-4">
-              <label className="text-xs font-semibold text-slate-600 flex items-center gap-1.5 cursor-pointer">
+              <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5 cursor-pointer">
                 <input
                   type="radio"
                   name="importMode"
@@ -2199,7 +2482,7 @@ export default function MindmapCanvas({
                 />
                 Merge into Current Map
               </label>
-              <label className="text-xs font-semibold text-slate-600 flex items-center gap-1.5 cursor-pointer">
+              <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5 cursor-pointer">
                 <input
                   type="radio"
                   name="importMode"
@@ -2213,7 +2496,7 @@ export default function MindmapCanvas({
             </div>
 
             {aiImportError && (
-              <p className="mt-3 text-xs text-red-600 bg-red-50 p-2.5 rounded-lg border border-red-100">
+              <p className="mt-3 text-xs text-red-600 bg-red-50 dark:bg-red-950/50 dark:text-red-300 p-2.5 rounded-lg border border-red-100 dark:border-red-900">
                 {aiImportError}
               </p>
             )}
@@ -2225,7 +2508,7 @@ export default function MindmapCanvas({
                   setAiImportText('');
                   setAiImportError(null);
                 }}
-                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                className="px-4 py-2 text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition"
               >
                 Cancel
               </button>
