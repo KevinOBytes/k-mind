@@ -346,6 +346,15 @@ export default function MindmapCanvas({
     const isSearchActive = searchQuery.trim().length > 0;
     const q = searchQuery.toLowerCase().trim();
 
+    const selectedNodeId = selectedNode?.id || null;
+    const connectedNeighborIds = new Set<string>();
+    if (selectedNodeId) {
+      edges.forEach((e) => {
+        if (e.source === selectedNodeId) connectedNeighborIds.add(e.target);
+        if (e.target === selectedNodeId) connectedNeighborIds.add(e.source);
+      });
+    }
+
     const hydratedNodes = nodes.map((node) => {
       const hasChildren = parentIds.has(node.id);
       const nodeDepth = depths.get(node.id) ?? 1;
@@ -361,6 +370,9 @@ export default function MindmapCanvas({
           description.toLowerCase().includes(q) ||
           tags.some((t) => t.toLowerCase().includes(q)));
 
+      const isNeighbor = connectedNeighborIds.has(node.id);
+      const isDimmed = Boolean(selectedNodeId && node.id !== selectedNodeId && !isNeighbor);
+
       return {
         ...node,
         data: {
@@ -370,6 +382,8 @@ export default function MindmapCanvas({
           depth: nodeDepth,
           isRoot,
           isSearchMatch: matchesSearch,
+          isNeighbor,
+          isDimmed,
           collapsed: Boolean(node.data?.collapsed),
           readOnly,
           onUpdateLabel: (nodeId: string, newLabel: string) => {
@@ -434,29 +448,37 @@ export default function MindmapCanvas({
     const visibleNodes = hydratedNodes.filter((n) => !hiddenNodeIds.has(n.id));
     const visibleEdges = edges
       .filter((e) => !hiddenNodeIds.has(e.source) && !hiddenNodeIds.has(e.target))
-      .map((e) => ({
-        ...e,
-        data: {
-          ...e.data,
-          theme,
-          readOnly,
-          label: (e.data?.label as string) || (e as { label?: string }).label || '',
-          onUpdateEdgeLabel: (edgeId: string, nextLabel: string) => {
-            if (readOnly) return;
-            recordHistory();
-            setEdges((eds) =>
-              eds.map((ed) =>
-                ed.id === edgeId
-                  ? { ...ed, label: nextLabel, data: { ...ed.data, label: nextLabel, theme } }
-                  : ed
-              )
-            );
+      .map((e) => {
+        const isConnected = selectedNodeId
+          ? e.source === selectedNodeId || e.target === selectedNodeId
+          : false;
+
+        return {
+          ...e,
+          data: {
+            ...e.data,
+            theme,
+            readOnly,
+            isHighlighted: isConnected,
+            isAnyNodeSelected: Boolean(selectedNodeId),
+            label: (e.data?.label as string) || (e as { label?: string }).label || '',
+            onUpdateEdgeLabel: (edgeId: string, nextLabel: string) => {
+              if (readOnly) return;
+              recordHistory();
+              setEdges((eds) =>
+                eds.map((ed) =>
+                  ed.id === edgeId
+                    ? { ...ed, label: nextLabel, data: { ...ed.data, label: nextLabel, theme } }
+                    : ed
+                )
+              );
+            },
           },
-        },
-      }));
+        };
+      });
 
     return { visibleNodes, visibleEdges };
-  }, [nodes, edges, setNodes, setEdges, readOnly, recordHistory, searchQuery, theme]);
+  }, [nodes, edges, setNodes, setEdges, readOnly, recordHistory, searchQuery, theme, selectedNode]);
 
   // Node selection handler
   const onNodeClick = useCallback((_: React.MouseEvent | TouchEvent, node: Node) => {

@@ -28,6 +28,8 @@ export type SkillNodeData = Node<{
   tasks?: TaskItem[];
   tags?: string[];
   isSearchMatch?: boolean;
+  isNeighbor?: boolean;
+  isDimmed?: boolean;
   onToggleCollapse?: (id: string) => void;
   onUpdateLabel?: (id: string, newLabel: string) => void;
   onToggleTask?: (nodeId: string, taskId: string) => void;
@@ -193,7 +195,11 @@ export const SkillNode = memo(({ id, data, selected }: NodeProps<SkillNodeData>)
         isSearchMatch ? 'ring-4 ring-amber-400 ring-offset-2 animate-pulse border-amber-500 z-30' : ''
       } ${
         selected
-          ? 'ring-4 ring-blue-400 ring-opacity-60 border-blue-500 scale-105 z-20'
+          ? 'ring-4 ring-blue-500 ring-opacity-80 border-blue-500 scale-105 z-30 shadow-2xl'
+          : data.isNeighbor
+          ? 'ring-2 ring-blue-400/50 border-blue-400/70 z-20 shadow-lg'
+          : data.isDimmed
+          ? 'opacity-65 hover:opacity-100'
           : ''
       }`}
       style={{
