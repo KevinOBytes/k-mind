@@ -29,12 +29,14 @@ export const SkillEdge = ({
   const [localLabel, setLocalLabel] = useState((data?.label as string) || '');
 
   const theme: CanvasTheme = (data?.theme as CanvasTheme) || 'light';
+  const isHighlighted = selected || Boolean(data?.isHighlighted);
+  const isAnyNodeSelected = Boolean(data?.isAnyNodeSelected);
 
-  const strokeColors: Record<CanvasTheme, { normal: string; selected: string }> = {
-    light: { normal: '#94a3b8', selected: '#2563eb' },
-    dark: { normal: '#475569', selected: '#60a5fa' },
-    neon: { normal: '#0891b2', selected: '#f43f5e' },
-    sepia: { normal: '#9c836c', selected: '#78350f' },
+  const strokeColors: Record<CanvasTheme, { normal: string; highlighted: string; dimmed: string }> = {
+    light: { normal: '#94a3b8', highlighted: '#2563eb', dimmed: '#cbd5e1' },
+    dark: { normal: '#475569', highlighted: '#60a5fa', dimmed: '#1e293b' },
+    neon: { normal: '#0891b2', highlighted: '#06b6d4', dimmed: '#0f2735' },
+    sepia: { normal: '#9c836c', highlighted: '#b45309', dimmed: '#ded3be' },
   };
 
   const badgeStyles: Record<CanvasTheme, string> = {
@@ -44,9 +46,14 @@ export const SkillEdge = ({
     sepia: 'bg-[#fffdfa]/95 text-[#4a3b2c] border-[#ded3be] hover:border-[#b08968]',
   };
 
-  const currentStroke = selected
-    ? strokeColors[theme]?.selected || strokeColors.light.selected
+  const currentStroke = isHighlighted
+    ? strokeColors[theme]?.highlighted || strokeColors.light.highlighted
+    : isAnyNodeSelected
+    ? strokeColors[theme]?.dimmed || strokeColors.light.dimmed
     : strokeColors[theme]?.normal || strokeColors.light.normal;
+
+  const currentStrokeWidth = isHighlighted ? 4.5 : isAnyNodeSelected ? 1.5 : 2.5;
+  const currentOpacity = isHighlighted ? 1 : isAnyNodeSelected ? 0.35 : 1;
 
   const currentBadgeClass = badgeStyles[theme] || badgeStyles.light;
 
@@ -67,9 +74,11 @@ export const SkillEdge = ({
         markerEnd={markerEnd}
         style={{
           ...style,
-          strokeWidth: selected ? 3.5 : 2.5,
+          strokeWidth: currentStrokeWidth,
           stroke: currentStroke,
-          transition: 'stroke 0.2s ease, stroke-width 0.2s ease',
+          opacity: currentOpacity,
+          zIndex: isHighlighted ? 20 : 0,
+          transition: 'stroke 0.2s ease, stroke-width 0.2s ease, opacity 0.2s ease',
         }}
       />
 
@@ -79,8 +88,11 @@ export const SkillEdge = ({
             position: 'absolute',
             transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
             pointerEvents: 'all',
+            zIndex: isHighlighted ? 25 : 10,
+            opacity: currentOpacity,
+            transition: 'opacity 0.2s ease',
           }}
-          className="nodrag nopan z-10"
+          className="nodrag nopan"
         >
           {isEditing && !data?.readOnly ? (
             <input
@@ -105,12 +117,14 @@ export const SkillEdge = ({
                   setIsEditing(true);
                 }
               }}
-              className={`text-[10px] font-bold border px-1.5 py-0.5 rounded-md shadow-sm transition flex items-center gap-1 cursor-pointer select-none ${currentBadgeClass}`}
+              className={`text-[10px] font-bold border px-1.5 py-0.5 rounded-md shadow-sm transition flex items-center gap-1 cursor-pointer select-none ${
+                isHighlighted ? 'ring-2 ring-blue-400/50 scale-105' : ''
+              } ${currentBadgeClass}`}
               title="Double-click to edit relationship label"
             >
               <span>{(data?.label as string) || localLabel}</span>
             </div>
-          ) : selected && !data?.readOnly ? (
+          ) : (selected || isHighlighted) && !data?.readOnly ? (
             <button
               onClick={(e) => {
                 e.stopPropagation();
